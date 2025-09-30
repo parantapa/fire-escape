@@ -19,6 +19,9 @@ classifiers = [
 
 dependencies = [
     "click",
+    "lark",
+    "jinja2",
+    "json5"
 ]
 
 [project.urls]

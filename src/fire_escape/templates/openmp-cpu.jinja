@@ -1,0 +1,85 @@
+{#- name: "main.cpp" -#}
+
+#include <fmt/base.h>
+
+int main(int argc, char* argv[]) {
+    fmt::println("hello, {{ module }}");
+    return 0;
+}
+
+{#- name: "CMakeLists.txt" -#}
+
+cmake_minimum_required(VERSION 4.0)
+
+project(
+  {{ module }}
+  VERSION 0.1.0
+  LANGUAGES CXX)
+
+find_program(CCACHE_FOUND ccache)
+if(CCACHE_FOUND)
+  set(CMAKE_CXX_COMPILER_LAUNCHER ccache)
+endif(CCACHE_FOUND)
+
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_POLICY_DEFAULT_CMP0168 NEW)
+set(CMAKE_OPTIMIZE_DEPENDENCIES TRUE)
+
+option(ENABLE_DEV_MODE "Enable developer mode" OFF)
+option(ENABLE_SANITIZERS "Enable sanitzers sanitizer" OFF)
+
+include(FetchContent)
+FetchContent_Declare(
+  fmt
+  SYSTEM
+  GIT_REPOSITORY https://github.com/fmtlib/fmt.git
+  GIT_TAG 11.2.0
+  GIT_SHALLOW TRUE
+  GIT_PROGRESS TRUE)
+FetchContent_Declare(
+  argparse
+  SYSTEM
+  GIT_REPOSITORY https://github.com/p-ranav/argparse.git
+  GIT_TAG v3.2
+  GIT_SHALLOW TRUE
+  GIT_PROGRESS TRUE)
+FetchContent_Declare(
+  phmap
+  SYSTEM
+  GIT_REPOSITORY https://github.com/greg7mdp/parallel-hashmap.git
+  GIT_TAG v2.0.0
+  GIT_SHALLOW TRUE
+  GIT_PROGRESS TRUE)
+FetchContent_Declare(
+  duckdb
+  SYSTEM
+  CMAKE_ARGS
+    -DBUILD_SHELL=FALSE
+    -DBUILD_UNITTESTS=FALSE
+    -DENABLE_UNITTEST_CPP_TESTS=FALSE
+  GIT_REPOSITORY https://github.com/duckdb/duckdb.git
+  GIT_TAG v1.3.2
+  GIT_SHALLOW TRUE
+  GIT_PROGRESS TRUE)
+FetchContent_MakeAvailable(fmt argparse phmap duckdb)
+
+find_package(OpenMP REQUIRED)
+
+if(ENABLE_SANITIZERS)
+  add_compile_options(-fsanitize=address,undefined)
+  add_link_options(-fsanitize=address,undefined)
+endif(ENABLE_SANITIZERS)
+
+if(ENABLE_DEV_MODE)
+  add_compile_options(-g -D_GLIBCXX_ASSERTIONS -D_GLIBCXX_SANITIZE_VECTOR)
+  add_compile_options(-Wall -Wextra -Wshadow -Wunreachable-code -Wformat=2)
+endif(ENABLE_DEV_MODE)
+
+add_executable(main main.cpp)
+target_link_libraries(main
+    PRIVATE
+    fmt::fmt
+    argparse::argparse
+    phmap
+    duckdb
+    OpenMP::OpenMP_CXX)
