@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fire-escape"
+version = "0.1.0"
+authors = [
+  { name="Parantapa Bhattacharya", email="parantapa@virginia.edu" },
+]
+description = " A high-performance forest fire simulator. "
+readme = "README.md"
+requires-python = ">=3.13"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+dependencies = [
+    "click",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/parantapa/fire-escape"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+ffsc = "fire_escape.cli:main"
