@@ -3,8 +3,10 @@
 from pathlib import Path
 
 import click
+import rich
 
 from .templates import render
+from .parser import parse
 
 
 @click.group()
@@ -33,6 +35,9 @@ def compile(input_file: Path, output_dir: Path):
 
     module = input_file.name
     print(f"Compiling module: {module}")
+
+    # print(.pretty())
+    rich.print(parse(input_file.read_text()))
 
     with open(output_dir / "main.cpp", "wt") as fobj:
         code = render("openmp-cpu:main.cpp", module=module)

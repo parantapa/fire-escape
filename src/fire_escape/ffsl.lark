@@ -1,0 +1,37 @@
+source: assignment (";" assignment )* ";"
+
+assignment: id ( ":" id )? "=" expression
+
+?expression: binary_or
+?!binary_or: binary_and ( "or" binary_and )*
+?!binary_and: unary_not ( "and" unary_not )*
+?!unary_not: "not" unary_not | binary_cmp
+?!binary_cmp: binary_add ( ( "==" | "!=" | ">" | ">=" | "<" | "<=" ) binary_add )*
+?!binary_add: binary_mul ( ( "-" | "+" ) binary_mul )*
+?!binary_mul: unary_neg ( ( "/" | "*" | "%" ) unary_neg )*
+?!unary_neg: "-" unary_neg | unary_exp
+?!unary_exp: "**" unary_exp | primary
+?primary: "True"        -> true
+     | "False"          -> false
+     | int
+     | float
+     | str
+     | ref
+     | "(" expression ")"
+
+int: INT
+float: FLOAT
+str: ESCAPED_STRING
+id: CNAME
+
+ref: CNAME
+
+%import common.INT
+%import common.FLOAT
+%import common.ESCAPED_STRING
+%import common.CNAME
+%import common.WS
+%import common.SH_COMMENT
+
+%ignore WS
+%ignore SH_COMMENT

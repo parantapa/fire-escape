@@ -1,0 +1,6 @@
+# hello
+#
+x: int = 10 ;
+
+y = "Hello" + World == 10.0 + ( - "20" ) ;
+
