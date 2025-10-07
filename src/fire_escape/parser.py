@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import importlib.resources
 from functools import cache
+from collections import ChainMap
+from typing import Any
 
 from lark import Lark, Transformer
 
 from .ast_nodes import *
-from .scope import Scope
 
 GRAMMAR_ANCHOR = __name__
 GRAMMAR_FILE = "ffsl.lark"
@@ -164,18 +165,20 @@ class AstTransformer(Transformer):
         return Source(stmts=children, line=child.line, col=child.col, children=children)
 
 
-def build_scope(node: AstNode, scope: Scope | None):
+def build_scope(node: AstNode, scope: ChainMap[str, Any] | None):
     match node:
         case Source() as source:
             assert scope is None
-            scope = Scope("source")
+            scope = ChainMap()
             source.scope = scope
         case Ref() as ref:
             assert scope is not None
             ref.scope = scope
         case LocalVariable() as var:
             assert scope is not None
-            scope.define(var.name, var)
+            if var.name in scope.maps[0]:
+                raise RuntimeError(f"{var.name} has already been defined.")
+            scope[var.name] = var
 
     for child in node.children:
         build_scope(child, scope)

@@ -19,8 +19,8 @@ __all__ = [
 ]
 
 from dataclasses import dataclass, field
-
-from .scope import Scope
+from collections import ChainMap
+from typing import Any
 
 
 @dataclass
@@ -56,7 +56,7 @@ Literal = Bool | Int | Float | Str
 @dataclass
 class Ref(AstNode):
     name: str
-    scope: Scope | None = field(default=None)
+    scope: ChainMap[str, Any] | None = field(default=None)
 
 
 @dataclass
@@ -107,4 +107,4 @@ Statement = AssignmentStmt | UpdateStmt
 @dataclass
 class Source(AstNode):
     stmts: list[Statement]
-    scope: Scope | None = field(default=None)
+    scope: ChainMap[str, Any] | None = field(default=None)
