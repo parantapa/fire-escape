@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import importlib.resources
 from functools import cache
-from dataclasses import dataclass, field
 
 from lark import Lark, Transformer
+
+from .ast_nodes import *
 
 GRAMMAR_ANCHOR = __name__
 GRAMMAR_FILE = "ffsl.lark"
@@ -25,56 +26,6 @@ def get_parser() -> Lark:
             )
 
     raise RuntimeError("Unable to create parser.")
-
-
-@dataclass
-class AstNode:
-    line: int = field(repr=False, compare=False)
-    col: int = field(repr=False, compare=False)
-
-
-@dataclass
-class Bool(AstNode):
-    value: bool
-
-
-@dataclass
-class Int(AstNode):
-    value: int
-
-
-@dataclass
-class Float(AstNode):
-    value: float
-
-
-@dataclass
-class Str(AstNode):
-    value: str
-
-
-@dataclass
-class Ref(AstNode):
-    name: str
-
-
-Literal = Int | Float | Str | Ref
-
-
-@dataclass
-class UnaryExpression(AstNode):
-    op: str
-    arg: Expression
-
-
-@dataclass
-class BinaryExpression(AstNode):
-    left: Expression
-    op: str
-    right: Expression
-
-
-Expression = Literal | UnaryExpression | BinaryExpression
 
 
 class AstTransformer(Transformer):
@@ -112,19 +63,17 @@ class AstTransformer(Transformer):
     def _unary(self, children):
         match children:
             case op, arg:
-                return UnaryExpression(
-                    op=op.value, arg=arg, line=op.line, col=op.column
-                )
+                return UnaryExpr(op=op.value, arg=arg, line=op.line, col=op.column)
             case arg:
                 return arg
 
-    def _binary(self, children):
+    def _binary_left_assoc(self, children):
         if len(children) == 1:
             return children[0]
         else:
-            left, op, *right = children
-            right = self._binary(right)
-            return BinaryExpression(
+            *left, op, right = children
+            left = self._binary_left_assoc(left)
+            return BinaryExpr(
                 left=left, op=op.value, right=right, line=left.line, col=left.col
             )
 
@@ -132,10 +81,10 @@ class AstTransformer(Transformer):
     unary_neg = _unary
     unary_not = _unary
 
-    binary_mul = _binary
-    binary_add = _binary
-    binary_cmp = _binary
-    binary_and = _binary
+    binary_mul = _binary_left_assoc
+    binary_add = _binary_left_assoc
+    binary_cmp = _binary_left_assoc
+    binary_and = _binary_left_assoc
 
 
 def parse(text: str):
