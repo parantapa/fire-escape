@@ -14,9 +14,13 @@ __all__ = [
     "TypeRef",
     "AssignmentStmt",
     "UpdateStmt",
+    "Source",
+    "LocalVariable",
 ]
 
 from dataclasses import dataclass, field
+
+from .scope import Scope
 
 
 @dataclass
@@ -52,6 +56,7 @@ Literal = Bool | Int | Float | Str
 @dataclass
 class Ref(AstNode):
     name: str
+    scope: Scope | None = field(default=None)
 
 
 @dataclass
@@ -71,6 +76,12 @@ Expression = Literal | Ref | UnaryExpr | BinaryExpr
 
 
 @dataclass
+class LocalVariable(AstNode):
+    name: str
+    type: TypeRef
+
+
+@dataclass
 class TypeRef(AstNode):
     is_const: bool
     name: str
@@ -79,8 +90,8 @@ class TypeRef(AstNode):
 @dataclass
 class AssignmentStmt(AstNode):
     lvalue: Ref
-    type: TypeRef | None
     rvalue: Expression
+    var: LocalVariable | None
 
 
 @dataclass
@@ -96,3 +107,4 @@ Statement = AssignmentStmt | UpdateStmt
 @dataclass
 class Source(AstNode):
     stmts: list[Statement]
+    scope: Scope | None = field(default=None)

@@ -8,7 +8,7 @@ from functools import cache
 from lark import Lark, Transformer
 
 from .ast_nodes import *
-from .ast_nodes import Source
+from .scope import Scope
 
 GRAMMAR_ANCHOR = __name__
 GRAMMAR_FILE = "ffsl.lark"
@@ -94,7 +94,7 @@ class AstTransformer(Transformer):
     binary_cmp = _binary_left_assoc
     binary_and = _binary_left_assoc
 
-    def type_ref(self, children):
+    def type(self, children):
         match children:
             case [op, name]:
                 return TypeRef(
@@ -118,19 +118,26 @@ class AstTransformer(Transformer):
     def assignment_stmt(self, children):
         match children:
             case [lvalue, type, rvalue]:
-                return AssignmentStmt(
-                    lvalue=lvalue,
+                var = LocalVariable(
+                    name=lvalue.name,
                     type=type,
-                    rvalue=rvalue,
                     line=lvalue.line,
                     col=lvalue.col,
-                    children=[lvalue, type, rvalue],
+                    children=[],
+                )
+                return AssignmentStmt(
+                    lvalue=lvalue,
+                    rvalue=rvalue,
+                    var=var,
+                    line=lvalue.line,
+                    col=lvalue.col,
+                    children=[lvalue, rvalue, var],
                 )
             case [lvalue, rvalue]:
                 return AssignmentStmt(
                     lvalue=lvalue,
-                    type=None,
                     rvalue=rvalue,
+                    var=None,
                     line=lvalue.line,
                     col=lvalue.col,
                     children=[lvalue, rvalue],
@@ -157,8 +164,26 @@ class AstTransformer(Transformer):
         return Source(stmts=children, line=child.line, col=child.col, children=children)
 
 
+def build_scope(node: AstNode, scope: Scope | None):
+    match node:
+        case Source() as source:
+            assert scope is None
+            scope = Scope("source")
+            source.scope = scope
+        case Ref() as ref:
+            assert scope is not None
+            ref.scope = scope
+        case LocalVariable() as var:
+            assert scope is not None
+            scope.define(var.name, var)
+
+    for child in node.children:
+        build_scope(child, scope)
+
+
 def parse(text: str):
     parser = get_parser()
     tree = parser.parse(text)
-    tree = AstTransformer().transform(tree)
-    return tree
+    source: Source = AstTransformer().transform(tree)
+    build_scope(source, None)
+    return source
