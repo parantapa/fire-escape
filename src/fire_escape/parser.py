@@ -8,6 +8,7 @@ from functools import cache
 from lark import Lark, Transformer
 
 from .ast_nodes import *
+from .ast_nodes import Source
 
 GRAMMAR_ANCHOR = __name__
 GRAMMAR_FILE = "ffsl.lark"
@@ -31,31 +32,31 @@ def get_parser() -> Lark:
 class AstTransformer(Transformer):
     def true(self, children):
         child = children[0]
-        return Bool(value=True, line=child.line, col=child.column)
+        return Bool(value=True, line=child.line, col=child.column, children=[])
 
     def false(self, children):
         child = children[0]
-        return Bool(value=False, line=child.line, col=child.column)
+        return Bool(value=False, line=child.line, col=child.column, children=[])
 
     def int(self, children):
         child = children[0]
         value = int(child.value)
-        return Int(value=value, line=child.line, col=child.column)
+        return Int(value=value, line=child.line, col=child.column, children=[])
 
     def float(self, children):
         child = children[0]
         value = float(child.value)
-        return Float(value=value, line=child.line, col=child.column)
+        return Float(value=value, line=child.line, col=child.column, children=[])
 
     def str(self, children):
         child = children[0]
         value = child.value.lstrip('"').rstrip('"')
-        return Str(value=value, line=child.line, col=child.column)
+        return Str(value=value, line=child.line, col=child.column, children=[])
 
     def ref(self, children):
         child = children[0]
         name = child.value
-        return Ref(name=name, line=child.line, col=child.column)
+        return Ref(name=name, line=child.line, col=child.column, children=[])
 
     # def primary(self, children):
     #     return children[0]
@@ -63,7 +64,9 @@ class AstTransformer(Transformer):
     def _unary(self, children):
         match children:
             case op, arg:
-                return UnaryExpr(op=op.value, arg=arg, line=op.line, col=op.column)
+                return UnaryExpr(
+                    op=op.value, arg=arg, line=op.line, col=op.column, children=[arg]
+                )
             case arg:
                 return arg
 
@@ -74,17 +77,84 @@ class AstTransformer(Transformer):
             *left, op, right = children
             left = self._binary_left_assoc(left)
             return BinaryExpr(
-                left=left, op=op.value, right=right, line=left.line, col=left.col
+                left=left,
+                op=op.value,
+                right=right,
+                line=left.line,
+                col=left.col,
+                children=[left, right],
             )
 
-    unary_exp = _unary
     unary_neg = _unary
     unary_not = _unary
 
+    binary_exp = _binary_left_assoc
     binary_mul = _binary_left_assoc
     binary_add = _binary_left_assoc
     binary_cmp = _binary_left_assoc
     binary_and = _binary_left_assoc
+
+    def type_ref(self, children):
+        match children:
+            case [op, name]:
+                return TypeRef(
+                    is_const=True,
+                    name=name.value,
+                    line=op.line,
+                    col=op.column,
+                    children=[],
+                )
+            case [name]:
+                return TypeRef(
+                    is_const=False,
+                    name=name.value,
+                    line=name.line,
+                    col=name.column,
+                    children=[],
+                )
+            case _ as unexpected:
+                raise RuntimeError(f"{unexpected=}")
+
+    def assignment_stmt(self, children):
+        match children:
+            case [lvalue, type, rvalue]:
+                return AssignmentStmt(
+                    lvalue=lvalue,
+                    type=type,
+                    rvalue=rvalue,
+                    line=lvalue.line,
+                    col=lvalue.col,
+                    children=[lvalue, type, rvalue],
+                )
+            case [lvalue, rvalue]:
+                return AssignmentStmt(
+                    lvalue=lvalue,
+                    type=None,
+                    rvalue=rvalue,
+                    line=lvalue.line,
+                    col=lvalue.col,
+                    children=[lvalue, rvalue],
+                )
+            case _ as unexpected:
+                raise RuntimeError(f"{unexpected=}")
+
+    def update_stmt(self, children):
+        match children:
+            case [lvalue, op, rvalue]:
+                return UpdateStmt(
+                    lvalue=lvalue,
+                    op=op.value,
+                    rvalue=rvalue,
+                    line=lvalue.line,
+                    col=lvalue.col,
+                    children=[lvalue, rvalue],
+                )
+            case _ as unexpected:
+                raise RuntimeError(f"{unexpected=}")
+
+    def source(self, children):
+        child = children[0]
+        return Source(stmts=children, line=child.line, col=child.col, children=children)
 
 
 def parse(text: str):

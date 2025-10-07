@@ -2,7 +2,19 @@
 
 from __future__ import annotations
 
-__all__ = ["AstNode", "Bool", "Int", "Float", "Str", "Ref", "UnaryExpr", "BinaryExpr"]
+__all__ = [
+    "AstNode",
+    "Bool",
+    "Int",
+    "Float",
+    "Str",
+    "UnaryExpr",
+    "BinaryExpr",
+    "Ref",
+    "TypeRef",
+    "AssignmentStmt",
+    "UpdateStmt",
+]
 
 from dataclasses import dataclass, field
 
@@ -11,6 +23,7 @@ from dataclasses import dataclass, field
 class AstNode:
     line: int = field(repr=False, compare=False)
     col: int = field(repr=False, compare=False)
+    children: list[AstNode] = field(repr=False, compare=False)
 
 
 @dataclass
@@ -33,12 +46,12 @@ class Str(AstNode):
     value: str
 
 
+Literal = Bool | Int | Float | Str
+
+
 @dataclass
 class Ref(AstNode):
     name: str
-
-
-Literal = Int | Float | Str | Ref
 
 
 @dataclass
@@ -54,4 +67,32 @@ class BinaryExpr(AstNode):
     right: Expression
 
 
-Expression = Literal | UnaryExpr | BinaryExpr
+Expression = Literal | Ref | UnaryExpr | BinaryExpr
+
+
+@dataclass
+class TypeRef(AstNode):
+    is_const: bool
+    name: str
+
+
+@dataclass
+class AssignmentStmt(AstNode):
+    lvalue: Ref
+    type: TypeRef | None
+    rvalue: Expression
+
+
+@dataclass
+class UpdateStmt(AstNode):
+    lvalue: Ref
+    op: str
+    rvalue: Expression
+
+
+Statement = AssignmentStmt | UpdateStmt
+
+
+@dataclass
+class Source(AstNode):
+    stmts: list[Statement]
