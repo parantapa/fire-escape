@@ -56,13 +56,18 @@ Literal = Bool | Int | Float | Str
 @dataclass
 class Ref(AstNode):
     name: str
-    scope: ChainMap[str, Any] | None = field(default=None)
+    scope: ChainMap[str, Any] | None = field(default=None, repr=False, compare=False)
+
+    def value(self) -> Any:
+        assert self.scope is not None
+        return self.scope[self.name]
 
 
 @dataclass
 class UnaryExpr(AstNode):
     op: str
     arg: Expression
+    type: str | None = field(default=None)
 
 
 @dataclass
@@ -70,6 +75,7 @@ class BinaryExpr(AstNode):
     left: Expression
     op: str
     right: Expression
+    type: str | None = field(default=None)
 
 
 Expression = Literal | Ref | UnaryExpr | BinaryExpr
@@ -107,4 +113,4 @@ Statement = AssignmentStmt | UpdateStmt
 @dataclass
 class Source(AstNode):
     stmts: list[Statement]
-    scope: ChainMap[str, Any] | None = field(default=None)
+    scope: ChainMap[str, Any] | None = field(default=None, repr=False, compare=False)

@@ -10,6 +10,7 @@ from typing import Any
 from lark import Lark, Transformer
 
 from .ast_nodes import *
+from .type_check import check_type, TypeEnv
 
 GRAMMAR_ANCHOR = __name__
 GRAMMAR_FILE = "ffsl.lark"
@@ -124,7 +125,7 @@ class AstTransformer(Transformer):
                     type=type,
                     line=lvalue.line,
                     col=lvalue.col,
-                    children=[],
+                    children=[type],
                 )
                 return AssignmentStmt(
                     lvalue=lvalue,
@@ -189,4 +190,7 @@ def parse(text: str):
     tree = parser.parse(text)
     source: Source = AstTransformer().transform(tree)
     build_scope(source, None)
+
+    env = TypeEnv.new()
+    check_type(source, env)
     return source
