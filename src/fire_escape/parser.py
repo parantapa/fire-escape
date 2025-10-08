@@ -10,6 +10,7 @@ from typing import Any
 from lark import Lark, Transformer
 
 from .ast_nodes import *
+from .error import *
 from .type_check import check_type, TypeEnv
 
 GRAMMAR_ANCHOR = __name__
@@ -28,7 +29,7 @@ def get_parser() -> Lark:
                 propagate_positions=True,
             )
 
-    raise RuntimeError("Unable to create parser.")
+    raise CompilerError("Unable to create parser.")
 
 
 class AstTransformer(Transformer):
@@ -65,12 +66,14 @@ class AstTransformer(Transformer):
 
     def _unary(self, children):
         match children:
-            case op, arg:
+            case [op, arg]:
                 return UnaryExpr(
                     op=op.value, arg=arg, line=op.line, col=op.column, children=[arg]
                 )
-            case arg:
+            case [arg]:
                 return arg
+            case _ as unexpected:
+                raise CompilerError(f"Unexpected unary expression: {unexpected=}")
 
     def _binary_left_assoc(self, children):
         if len(children) == 1:
@@ -115,7 +118,7 @@ class AstTransformer(Transformer):
                     children=[],
                 )
             case _ as unexpected:
-                raise RuntimeError(f"{unexpected=}")
+                raise CompilerError(f"Unexpected type: {unexpected=}")
 
     def assignment_stmt(self, children):
         match children:
@@ -145,7 +148,7 @@ class AstTransformer(Transformer):
                     children=[lvalue, rvalue],
                 )
             case _ as unexpected:
-                raise RuntimeError(f"{unexpected=}")
+                raise CompilerError(f"Unexpected assignment_stmt: {unexpected=}")
 
     def update_stmt(self, children):
         match children:
@@ -159,7 +162,7 @@ class AstTransformer(Transformer):
                     children=[lvalue, rvalue],
                 )
             case _ as unexpected:
-                raise RuntimeError(f"{unexpected=}")
+                raise CompilerError(f"Unexpected assignment_stmt: {unexpected=}")
 
     def print_stmt(self, children):
         child = children[0]
@@ -172,34 +175,48 @@ class AstTransformer(Transformer):
 
 
 def build_scope(node: AstNode, scope: ChainMap[str, Any] | None):
-    match node:
-        case Source() as source:
-            assert scope is None
-            scope = ChainMap()
-            source.scope = scope
-        case Ref() as ref:
-            assert scope is not None
-            ref.scope = scope
-        case LocalVariable() as var:
-            assert scope is not None
-            if var.name in scope.maps[0]:
-                raise RuntimeError(f"{var.name} has already been defined.")
-            scope[var.name] = var
+    try:
+        match node:
+            case Source() as source:
+                assert scope is None
+                scope = ChainMap()
+                source.scope = scope
+            case Ref() as ref:
+                assert scope is not None
+                ref.scope = scope
+            case LocalVariable() as var:
+                assert scope is not None
+                if var.name in scope.maps[0]:
+                    raise ReferenceError(
+                        f"{var.name} has already been defined.",
+                        line=var.line,
+                        col=var.col,
+                    )
+                scope[var.name] = var
 
-    for child in node.children:
-        build_scope(child, scope)
+        for child in node.children:
+            build_scope(child, scope)
+    except CodeError as e:
+        e.line = node.line if e.line is None else e.line
+        e.col = node.col if e.col is None else e.col
+        raise e
 
 
 def collect_local_varaibles(node: AstNode):
-    match node:
-        case Source() as source:
-            assert source.scope is not None
-            for var in source.scope.maps[0].values():
-                if isinstance(var, LocalVariable):
-                    source.lvars.append(var)
+    try:
+        match node:
+            case Source() as source:
+                assert source.scope is not None
+                for var in source.scope.maps[0].values():
+                    if isinstance(var, LocalVariable):
+                        source.lvars.append(var)
 
-    for child in node.children:
-        collect_local_varaibles(child)
+        for child in node.children:
+            collect_local_varaibles(child)
+    except CodeError as e:
+        e.line = node.line if e.line is None else e.line
+        e.col = node.col if e.col is None else e.col
+        raise e
 
 
 def parse(text: str):

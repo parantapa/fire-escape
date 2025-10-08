@@ -42,7 +42,6 @@ def compile(input_file: Path, output_dir: Path):
 
     with open(output_dir / "main.cpp", "wt") as fobj:
         code = codegen_openmp_cpu(source)
-        print(codegen_openmp_cpu(source))
         fobj.write(code)
 
     with open(output_dir / "CMakeLists.txt", "wt") as fobj:
