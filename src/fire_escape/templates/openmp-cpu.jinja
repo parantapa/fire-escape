@@ -1,14 +1,29 @@
-{#- name: "main.cpp" -#}
+{#- name: "assignment_stmt" -#}
+{{ lvalue }} = {{ rvalue }} ;
 
-#include <fmt/base.h>
+{#- name: "update_stmt" -#}
+{{ lvalue }} {{ op }} {{ rvalue }} ;
+
+{#- name: "print_stmt" -#}
+std::println({{ args | join(", ") }}) ;
+
+{#- name: "main.cpp" -#}
+#include <print>
+#include <cmath>
 
 int main(int argc, char* argv[]) {
-    fmt::println("hello, {{ module }}");
+    {% for var, type, init in lvars %}
+    {{ type }} {{ var }} = {{ init }} ;
+    {% endfor %}
+
+    {% for stmt in stmts %}
+    {{ stmt }}
+    {% endfor %}
+
     return 0;
 }
 
 {#- name: "CMakeLists.txt" -#}
-
 cmake_minimum_required(VERSION 4.0)
 
 project(
@@ -83,3 +98,4 @@ target_link_libraries(main
     phmap
     duckdb
     OpenMP::OpenMP_CXX)
+target_compile_features(main PRIVATE cxx_std_23)

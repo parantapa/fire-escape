@@ -119,4 +119,5 @@ Statement = AssignmentStmt | UpdateStmt | PrintStmt
 @dataclass
 class Source(AstNode):
     stmts: list[Statement]
+    lvars: list[LocalVariable] = field(default_factory=list, compare=False)
     scope: ChainMap[str, Any] | None = field(default=None, repr=False, compare=False)

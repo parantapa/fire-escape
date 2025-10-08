@@ -191,11 +191,25 @@ def build_scope(node: AstNode, scope: ChainMap[str, Any] | None):
         build_scope(child, scope)
 
 
+def collect_local_varaibles(node: AstNode):
+    match node:
+        case Source() as source:
+            assert source.scope is not None
+            for var in source.scope.maps[0].values():
+                if isinstance(var, LocalVariable):
+                    source.lvars.append(var)
+
+    for child in node.children:
+        collect_local_varaibles(child)
+
+
 def parse(text: str):
     parser = get_parser()
     tree = parser.parse(text)
     source: Source = AstTransformer().transform(tree)
     build_scope(source, None)
+    print(source.scope)
+    collect_local_varaibles(source)
 
     env = TypeEnv.new()
     check_type(source, env)

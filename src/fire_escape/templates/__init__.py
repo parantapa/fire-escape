@@ -96,18 +96,31 @@ _ENVIRONMENT = jinja2.Environment(
 
 @overload
 def render(
-    template: Literal["openmp-cpu:main.cpp"],
-    *,
-    module: str
+    template: Literal["openmp-cpu:assignment_stmt"], *, lvalue: str, rvalue: str
 ) -> str: ...
 
 
 @overload
 def render(
-    template: Literal["openmp-cpu:CMakeLists.txt"],
-    *,
-    module: str
+    template: Literal["openmp-cpu:update_stmt"], *, lvalue: str, op: str, rvalue: str
 ) -> str: ...
+
+
+@overload
+def render(template: Literal["openmp-cpu:print_stmt"], *, args: list[str]) -> str: ...
+
+
+@overload
+def render(
+    template: Literal["openmp-cpu:main.cpp"],
+    *,
+    stmts: list[str],
+    lvars: list[tuple[str, str, str]],
+) -> str: ...
+
+
+@overload
+def render(template: Literal["openmp-cpu:CMakeLists.txt"], *, module: str) -> str: ...
 
 
 def render(template, **kwargs) -> str:

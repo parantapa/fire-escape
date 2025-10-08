@@ -5,8 +5,9 @@ from pathlib import Path
 import click
 import rich
 
-from .templates import render
 from .parser import parse
+from .templates import render
+from .codegen import codegen_openmp_cpu
 
 
 @click.group()
@@ -36,11 +37,12 @@ def compile(input_file: Path, output_dir: Path):
     module = input_file.name
     print(f"Compiling module: {module}")
 
-    # print(.pretty())
-    rich.print(parse(input_file.read_text()))
+    source = parse(input_file.read_text())
+    rich.print(source)
 
     with open(output_dir / "main.cpp", "wt") as fobj:
-        code = render("openmp-cpu:main.cpp", module=module)
+        code = codegen_openmp_cpu(source)
+        print(codegen_openmp_cpu(source))
         fobj.write(code)
 
     with open(output_dir / "CMakeLists.txt", "wt") as fobj:
