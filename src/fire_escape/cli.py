@@ -5,6 +5,7 @@ from pathlib import Path
 import click
 import rich
 
+from .error import CodeError
 from .parser import parse
 from .templates import render
 from .codegen import codegen_openmp_cpu
@@ -37,16 +38,20 @@ def compile(input_file: Path, output_dir: Path):
     module = input_file.name
     print(f"Compiling module: {module}")
 
-    source = parse(input_file.read_text())
-    rich.print(source)
+    try:
+        source = parse(input_file.read_text())
+        rich.print(source)
 
-    with open(output_dir / "main.cpp", "wt") as fobj:
-        code = codegen_openmp_cpu(source)
-        fobj.write(code)
+        with open(output_dir / "main.cpp", "wt") as fobj:
+            code = codegen_openmp_cpu(source)
+            fobj.write(code)
 
-    with open(output_dir / "CMakeLists.txt", "wt") as fobj:
-        code = render("openmp-cpu:CMakeLists.txt", module=module)
-        fobj.write(code)
+        with open(output_dir / "CMakeLists.txt", "wt") as fobj:
+            code = render("openmp-cpu:CMakeLists.txt", module=module)
+            fobj.write(code)
+    except CodeError as e:
+        e.file = input_file if e.file is None else e.file
+        print("CodeError:", e)
 
 
 def main():
