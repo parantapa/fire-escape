@@ -163,9 +163,8 @@ class AstTransformer(Transformer):
 
     def print_stmt(self, children):
         child = children[0]
-        return PrintStmt(
-            args=children, line=child.line, col=child.col, children=children
-        )
+        args = children
+        return PrintStmt(args=args, line=child.line, col=child.col, children=args)
 
     def source(self, children):
         child = children[0]
@@ -208,7 +207,6 @@ def parse(text: str):
     tree = parser.parse(text)
     source: Source = AstTransformer().transform(tree)
     build_scope(source, None)
-    print(source.scope)
     collect_local_varaibles(source)
 
     env = TypeEnv.new()

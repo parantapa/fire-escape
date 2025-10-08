@@ -2,11 +2,14 @@
 %import common.FLOAT
 %import common.ESCAPED_STRING
 %import common.CNAME
-%import common.WS
-%import common.SH_COMMENT
+%import common.WS_INLINE
+%import common.NEWLINE
 
-%ignore WS
-%ignore SH_COMMENT
+COMMENT: /#[^\n]*/ NEWLINE
+_STMT_END: ";" | NEWLINE | ";" NEWLINE
+
+%ignore WS_INLINE
+%ignore COMMENT
 
 int: INT
 float: FLOAT
@@ -32,10 +35,10 @@ ref: CNAME
      | "(" expression ")"
 
 
-assignment_stmt: ref ( ":" type )? "=" expression
-!update_stmt: ref ( "+=" | "-=" | "*=" | "/=" ) expression
-print_stmt: "print" "(" expression ( "," expression )* ")"
+assignment_stmt: ref ( ":" type )? "=" expression _STMT_END
+!update_stmt: ref ( "+=" | "-=" | "*=" | "/=" ) expression _STMT_END
+print_stmt: "print" "(" expression ( "," expression )* ")" _STMT_END
 
 ?statement: assignment_stmt | update_stmt | print_stmt
 
-source: statement (";" statement )* ";"
+source: statement ( statement )*
