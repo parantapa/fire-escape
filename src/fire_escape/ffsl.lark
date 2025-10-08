@@ -6,7 +6,8 @@
 %import common.NEWLINE
 
 COMMENT: /#[^\n]*/ NEWLINE
-_STMT_END: ";" | NEWLINE | ";" NEWLINE
+_STMT_END.1: ";" | NEWLINE | ";" NEWLINE
+_NEWLINE: NEWLINE
 
 %ignore WS_INLINE
 %ignore COMMENT
@@ -32,7 +33,7 @@ ref: CNAME
      | float
      | str
      | ref
-     | "(" expression ")"
+     | "(" _NEWLINE? expression _NEWLINE? ")"
 
 
 assignment_stmt: ref ( ":" type )? "=" expression _STMT_END
