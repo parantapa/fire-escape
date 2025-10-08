@@ -161,6 +161,12 @@ class AstTransformer(Transformer):
             case _ as unexpected:
                 raise RuntimeError(f"{unexpected=}")
 
+    def print_stmt(self, children):
+        child = children[0]
+        return PrintStmt(
+            args=children, line=child.line, col=child.col, children=children
+        )
+
     def source(self, children):
         child = children[0]
         return Source(stmts=children, line=child.line, col=child.col, children=children)

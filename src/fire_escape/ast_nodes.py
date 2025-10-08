@@ -14,6 +14,7 @@ __all__ = [
     "TypeRef",
     "AssignmentStmt",
     "UpdateStmt",
+    "PrintStmt",
     "Source",
     "LocalVariable",
 ]
@@ -107,7 +108,12 @@ class UpdateStmt(AstNode):
     rvalue: Expression
 
 
-Statement = AssignmentStmt | UpdateStmt
+@dataclass
+class PrintStmt(AstNode):
+    args: list[Expression]
+
+
+Statement = AssignmentStmt | UpdateStmt | PrintStmt
 
 
 @dataclass

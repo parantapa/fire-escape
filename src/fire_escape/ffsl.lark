@@ -34,7 +34,8 @@ ref: CNAME
 
 assignment_stmt: ref ( ":" type )? "=" expression
 !update_stmt: ref ( "+=" | "-=" | "*=" | "/=" ) expression
+print_stmt: "print" "(" expression ( "," expression )* ")"
 
-?statement: assignment_stmt | update_stmt
+?statement: assignment_stmt | update_stmt | print_stmt
 
 source: statement (";" statement )* ";"
