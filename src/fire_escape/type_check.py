@@ -52,7 +52,10 @@ class TypeEnv:
             case "-":
                 if not self.is_convertable_to(arg_type, "float"):
                     raise TypeError(f"Unary `-` not supported for type {arg_type}")
-                return arg_type
+                if self.is_convertable_to(arg_type, "int"):
+                    return "int"
+                else:
+                    return "float"
             case "not":
                 if not self.is_convertable_to(arg_type, "float"):
                     raise TypeError(f"Unary `not` not supported for type {arg_type}")
