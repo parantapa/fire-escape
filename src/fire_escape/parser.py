@@ -169,6 +169,48 @@ class AstTransformer(Transformer):
             case _ as unexpected:
                 raise CompilerError(f"Unexpected assignment_stmt: {unexpected=}")
 
+    def else_section(self, children):
+        child = children[0]
+        return ElseSection(
+            stmts=children, line=child.line, col=child.col, children=children
+        )
+
+    def elif_section(self, children):
+        child = children[0]
+        condition, *stmts = children
+        return ElifSection(
+            condition=condition,
+            stmts=stmts,
+            line=child.line,
+            col=child.col,
+            children=children,
+        )
+
+    def if_stmt(self, children):
+        child = children[0]
+        condition, *rest = children
+        stmts = []
+        elifs = []
+        else_ = None
+        for obj in rest:
+            match obj:
+                case ElseSection():
+                    assert else_ is None
+                    else_ = obj
+                case ElifSection():
+                    elifs.append(obj)
+                case _:
+                    stmts.append(obj)
+        return IfStmt(
+            condition=condition,
+            stmts=stmts,
+            elifs=elifs,
+            else_=else_,
+            line=child.line,
+            col=child.col,
+            children=children,
+        )
+
     def print_stmt(self, children):
         child = children[0]
         args = children

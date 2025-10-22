@@ -112,6 +112,29 @@ def render(template: Literal["openmp-cpu:print_stmt"], *, args: list[str]) -> st
 
 @overload
 def render(
+    template: Literal["openmp-cpu:else_section"], *, stmts: list[str]
+) -> str: ...
+
+
+@overload
+def render(
+    template: Literal["openmp-cpu:elif_section"], *, condition: str, stmts: list[str]
+) -> str: ...
+
+
+@overload
+def render(
+    template: Literal["openmp-cpu:if_stmt"],
+    *,
+    condition: str,
+    stmts: list[str],
+    elifs: list[str],
+    else_: str,
+) -> str: ...
+
+
+@overload
+def render(
     template: Literal["openmp-cpu:main.cpp"],
     *,
     stmts: list[str],

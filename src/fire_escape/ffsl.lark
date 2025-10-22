@@ -41,6 +41,10 @@ assignment_stmt: ref ( ":" type )? "=" expression _STMT_END
 !update_stmt: ref ( "+=" | "-=" | "*=" | "/=" ) expression _STMT_END
 print_stmt: "print" "(" expression ( "," expression )* ")" _STMT_END
 
-?statement: pass_stmt | assignment_stmt | update_stmt | print_stmt
+if_stmt: "if" expression ":" _NEWLINE? statement+ elif_section* else_section? "end" _STMT_END
+elif_section: "elif" expression ":" _NEWLINE? statement+
+else_section: "else" ":" _NEWLINE? statement+
+
+?statement: pass_stmt | assignment_stmt | update_stmt | print_stmt | if_stmt
 
 source: statement+

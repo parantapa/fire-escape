@@ -15,6 +15,9 @@ __all__ = [
     "AssignmentStmt",
     "UpdateStmt",
     "PrintStmt",
+    "IfStmt",
+    "ElifSection",
+    "ElseSection",
     "Source",
     "LocalVariable",
 ]
@@ -93,9 +96,11 @@ class TypeRef(AstNode):
     is_const: bool
     name: str
 
+
 @dataclass
 class PassStmt(AstNode):
     pass
+
 
 @dataclass
 class AssignmentStmt(AstNode):
@@ -116,7 +121,26 @@ class PrintStmt(AstNode):
     args: list[Expression]
 
 
-Statement = PassStmt | AssignmentStmt | UpdateStmt | PrintStmt
+@dataclass
+class IfStmt(AstNode):
+    condition: Expression
+    stmts: list[Statement]
+    elifs: list[ElifSection]
+    else_: ElseSection | None
+
+
+@dataclass
+class ElifSection(AstNode):
+    condition: Expression
+    stmts: list[Statement]
+
+
+@dataclass
+class ElseSection(AstNode):
+    stmts: list[Statement]
+
+
+Statement = PassStmt | AssignmentStmt | UpdateStmt | PrintStmt | IfStmt
 
 
 @dataclass

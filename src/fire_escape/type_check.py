@@ -194,6 +194,15 @@ def check_type(node: AstNode, env: TypeEnv):
                         env.check_update(stmt.op, ltype, rtype)
                     case _:
                         raise CompilerError(f"Unknown lvalue type: {obj=}")
+            case IfStmt() as stmt:
+                cond_type = get_type(stmt.condition)
+                if not env.is_convertable_to(cond_type, "float"):
+                    raise TypeError("Testexpression type not boolean or numeric")
+            case ElifSection() as stmt:
+                cond_type = get_type(stmt.condition)
+                if not env.is_convertable_to(cond_type, "float"):
+                    raise TypeError("Condition expression type not boolean or numeric")
+
     except CodeError as e:
         e.line = node.line if e.line is None else e.line
         e.col = node.col if e.col is None else e.col

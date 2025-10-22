@@ -5,7 +5,38 @@
 {{ lvalue }} {{ op }} {{ rvalue }} ;
 
 {#- name: "print_stmt" -#}
-std::println({{ args | join(", ") }}) ;
+{% for arg in args %}
+{% if loop.last %}
+std::print("{}\n", {{ arg }});
+{% else %}
+std::print("{} ", {{ arg }});
+{% endif %}
+{% endfor %}
+
+{#- name: "else_section" -#}
+else {
+    {% for stmt in stmts %}
+    {{ stmt | indent }}
+    {% endfor %}
+}
+
+{#- name: "elif_section" -#}
+else if ({{ condition }}) {
+    {% for stmt in stmts %}
+    {{ stmt | indent }}
+    {% endfor %}
+}
+
+{#- name: "if_stmt" -#}
+if ({{ condition }}) {
+    {% for stmt in stmts %}
+    {{ stmt | indent }}
+    {% endfor %}
+}
+{% for elif in elifs %}
+{{ elif }}
+{% endfor %}
+{{ else_ }}
 
 {#- name: "main.cpp" -#}
 #include <print>
@@ -17,7 +48,7 @@ int main(int argc, char* argv[]) {
     {% endfor %}
 
     {% for stmt in stmts %}
-    {{ stmt }}
+    {{ stmt | indent }}
     {% endfor %}
 
     return 0;

@@ -91,6 +91,29 @@ def codegen_openmp_cpu(node: AstNode) -> str:
         case PrintStmt() as stmt:
             args = [codegen_expr(arg) for arg in stmt.args]
             return render("openmp-cpu:print_stmt", args=args)
+        case ElseSection() as stmt:
+            stmts = [codegen_openmp_cpu(stmt) for stmt in stmt.stmts]
+            return render("openmp-cpu:else_section", stmts=stmts)
+        case ElifSection() as stmt:
+            condition = codegen_expr(stmt.condition)
+            stmts = [codegen_openmp_cpu(stmt) for stmt in stmt.stmts]
+            return render("openmp-cpu:elif_section", condition=condition, stmts=stmts)
+        case IfStmt() as stmt:
+            condition = codegen_expr(stmt.condition)
+            stmts = [codegen_openmp_cpu(stmt) for stmt in stmt.stmts]
+            elifs = [codegen_openmp_cpu(section) for section in stmt.elifs]
+            else_ = (
+                codegen_openmp_cpu(stmt.else_)
+                if stmt.else_ is not None
+                else "// no else section"
+            )
+            return render(
+                "openmp-cpu:if_stmt",
+                condition=condition,
+                stmts=stmts,
+                elifs=elifs,
+                else_=else_,
+            )
         case Source() as source:
             lvars = []
             for lvar in source.lvars:
@@ -100,7 +123,6 @@ def codegen_openmp_cpu(node: AstNode) -> str:
                 lvars.append((var, type, init))
 
             stmts = [codegen_openmp_cpu(stmt) for stmt in source.stmts]
-
             return render("openmp-cpu:main.cpp", stmts=stmts, lvars=lvars)
 
     raise CompilerError(f"unexpected node type {node=}")
