@@ -93,6 +93,9 @@ class TypeRef(AstNode):
     is_const: bool
     name: str
 
+@dataclass
+class PassStmt(AstNode):
+    pass
 
 @dataclass
 class AssignmentStmt(AstNode):
@@ -113,7 +116,7 @@ class PrintStmt(AstNode):
     args: list[Expression]
 
 
-Statement = AssignmentStmt | UpdateStmt | PrintStmt
+Statement = PassStmt | AssignmentStmt | UpdateStmt | PrintStmt
 
 
 @dataclass

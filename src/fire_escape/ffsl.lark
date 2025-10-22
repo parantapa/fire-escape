@@ -36,10 +36,11 @@ ref: CNAME
      | "(" _NEWLINE? expression _NEWLINE? ")"
 
 
+!pass_stmt: "pass" _STMT_END
 assignment_stmt: ref ( ":" type )? "=" expression _STMT_END
 !update_stmt: ref ( "+=" | "-=" | "*=" | "/=" ) expression _STMT_END
 print_stmt: "print" "(" expression ( "," expression )* ")" _STMT_END
 
-?statement: assignment_stmt | update_stmt | print_stmt
+?statement: pass_stmt | assignment_stmt | update_stmt | print_stmt
 
-source: statement ( statement )*
+source: statement+

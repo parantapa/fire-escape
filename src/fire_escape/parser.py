@@ -10,6 +10,7 @@ from typing import Any
 from lark import Lark, Transformer
 
 from .ast_nodes import *
+from .ast_nodes import PassStmt
 from .error import *
 from .type_check import check_type, TypeEnv
 
@@ -119,6 +120,10 @@ class AstTransformer(Transformer):
                 )
             case _ as unexpected:
                 raise CompilerError(f"Unexpected type: {unexpected=}")
+
+    def pass_stmt(self, children):
+        child = children[0]
+        return PassStmt(line=child.line, col=child.column, children=[])
 
     def assignment_stmt(self, children):
         match children:

@@ -1,6 +1,7 @@
 """Code generation."""
 
 from .ast_nodes import *
+from .ast_nodes import PassStmt
 from .error import CompilerError
 from .templates import render
 
@@ -75,6 +76,8 @@ def codegen_openmp_cpu(node: AstNode) -> str:
     match node:
         case Bool() | Int() | Float() | Str() | Ref() | UnaryExpr() | BinaryExpr():
             return codegen_expr(node)
+        case PassStmt() as stmt:
+            return "// pass"
         case AssignmentStmt() as stmt:
             lvalue = codegen_expr(stmt.lvalue)
             rvalue = codegen_expr(stmt.rvalue)
