@@ -1,6 +1,7 @@
 """Code generation."""
 
 from .ast_nodes import *
+from .error import CompilerError
 from .templates import render
 
 
@@ -67,7 +68,7 @@ def codegen_expr(node: AstNode) -> str:
             else:
                 return f"( ({left}) {expr.op} ({right}) )"
 
-    raise RuntimeError(f"node type {node=}")
+    raise CompilerError(f"unexpected node type {node=}")
 
 
 def codegen_openmp_cpu(node: AstNode) -> str:
@@ -99,4 +100,4 @@ def codegen_openmp_cpu(node: AstNode) -> str:
 
             return render("openmp-cpu:main.cpp", stmts=stmts, lvars=lvars)
 
-    raise RuntimeError(f"node type {node=}")
+    raise CompilerError(f"unexpected node type {node=}")

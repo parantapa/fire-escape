@@ -6,8 +6,6 @@ y: const float = 20
 
 z: float = 10 > 20
 
-y = 20
-
 # y = "Hello" + World == 10.0 + ( - "20" ) 
 
 print("Hello, World")
