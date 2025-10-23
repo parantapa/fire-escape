@@ -99,10 +99,7 @@ FetchContent_Declare(
 FetchContent_Declare(
   duckdb
   SYSTEM
-  CMAKE_ARGS
-    -DBUILD_SHELL=FALSE
-    -DBUILD_UNITTESTS=FALSE
-    -DENABLE_UNITTEST_CPP_TESTS=FALSE
+  EXCLUDE_FROM_ALL
   GIT_REPOSITORY https://github.com/duckdb/duckdb.git
   GIT_TAG v1.3.2
   GIT_SHALLOW TRUE
