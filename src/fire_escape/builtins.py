@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-__all__ = ["BuiltinFunc"]
+__all__ = ["BuiltinFunc", "BuiltinConst"]
 
 from dataclasses import dataclass
 from collections import ChainMap
@@ -22,5 +22,13 @@ class BuiltinFunc:
         return f"({ptypes}) -> {self.rtype}"
 
 
+@dataclass
+class BuiltinConst:
+    name: str
+    type: str
+
+
 def add_builtins(scope: ChainMap[str, Any]):
     scope["sqrt"] = BuiltinFunc(name="sqrt", ptypes=["float"], rtype="float")
+
+    scope["CONFIG"] = BuiltinConst(name="CONFIG", type="json")

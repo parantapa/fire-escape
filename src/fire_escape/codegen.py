@@ -81,6 +81,19 @@ def codegen_expr(node: AstNode) -> str:
                     return f"{func}({args})"
                 case _ as unexpected:
                     raise CompilerError(f"unexpected function value {unexpected=}")
+        case JsonExpr() as expr:
+            idxs = [codegen_expr(idx) for idx in expr.idxs]
+            idxs = [f"[{idx}]" for idx in idxs]
+            idxs = "".join(idxs)
+
+            rtype = cpp_type(expr.type.name)
+
+            match expr.jvar.value():
+                case BuiltinConst() as const:
+                    cname = const.name
+                    return f"{cname}{idxs}.template get<{rtype}>()"
+                case _ as unexpected:
+                    raise CompilerError(f"unexpected json variable {unexpected=}")
 
     raise CompilerError(f"unexpected node type {node=}")
 
@@ -104,7 +117,9 @@ def codegen_openmp_cpu(node: AstNode) -> str:
         case PrintStmt() as stmt:
             args = [codegen_expr(arg) for arg in stmt.args]
             format_string = " ".join(["{}"] * len(args))
-            return render("openmp-cpu:print_stmt", format_string=format_string, args=args)
+            return render(
+                "openmp-cpu:print_stmt", format_string=format_string, args=args
+            )
         case ElseSection() as stmt:
             stmts = [codegen_openmp_cpu(stmt) for stmt in stmt.stmts]
             return render("openmp-cpu:else_section", stmts=stmts)

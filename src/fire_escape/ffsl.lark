@@ -19,6 +19,7 @@ ref: CNAME
 !type: "const"? CNAME
 
 func_call: ref "(" _NEWLINE? [ expression ( "," _NEWLINE? expression )* _NEWLINE? ]  ")"
+json_expr: ref ( "[" _NEWLINE? expression _NEWLINE? "]" )+ ":" type
 
 ?expression: binary_or
 ?!binary_or: binary_and ( "or" binary_and )*
@@ -36,6 +37,7 @@ func_call: ref "(" _NEWLINE? [ expression ( "," _NEWLINE? expression )* _NEWLINE
      | str
      | ref
      | func_call
+     | json_expr
      | "(" _NEWLINE? expression _NEWLINE? ")"
 
 !pass_stmt: "pass" _STMT_END

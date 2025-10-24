@@ -103,6 +103,17 @@ class AstTransformer(Transformer):
             func=func, args=args, line=func.line, col=func.col, children=children
         )
 
+    def json_expr(self, children):
+        jvar, *idxs, type = children
+        return JsonExpr(
+            jvar=jvar,
+            idxs=idxs,
+            type=type,
+            line=jvar.line,
+            col=jvar.col,
+            children=children,
+        )
+
     def type(self, children):
         match children:
             case [op, name]:

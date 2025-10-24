@@ -37,6 +37,9 @@ if ({{ condition }}) {
 #include <cstdint>
 
 #include <fmt/base.h>
+#include <nlohmann/json.hpp>
+
+nlohmann::json CONFIG;
 
 int main(int argc, char* argv[]) {
     {% for var, type, init in lvars %}

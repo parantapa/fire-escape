@@ -1,6 +1,6 @@
 # hello
 #
-x: int = 10
+x: int = 6
 
 y: const float = 20
 
@@ -10,12 +10,14 @@ z: float = 10 > 20
 
 pass
 
-if x < 30:
+if x > 30:
     x = 30
-elif x < 20:
+elif x > 20:
     pass
-elif x < 10:
+elif x > 10:
     pass
+elif x > 5:
+    z = CONFIG["wind"][10]["direction"]:int
 else:
     z = sqrt(20)
 end

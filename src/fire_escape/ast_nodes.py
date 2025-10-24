@@ -12,6 +12,7 @@ __all__ = [
     "BinaryExpr",
     "Ref",
     "FuncCall",
+    "JsonExpr",
     "TypeRef",
     "PassStmt",
     "AssignmentStmt",
@@ -97,7 +98,14 @@ class FuncCall(AstNode):
     type: str | None = field(default=None)
 
 
-Expression = Literal | Ref | UnaryExpr | BinaryExpr | FuncCall
+@dataclass
+class JsonExpr(AstNode):
+    jvar: Ref
+    idxs: list[Expression]
+    type: TypeRef
+
+
+Expression = Literal | Ref | UnaryExpr | BinaryExpr | FuncCall | JsonExpr
 
 
 @dataclass

@@ -109,7 +109,7 @@ class TypeEnv:
         else:
             raise CompilerError(f"Unexpected binary operator: {op}")
 
-    def check_call(self, ptypes: list[str], rtype: str, atypes: list[str]) -> str:
+    def check_func_call(self, ptypes: list[str], rtype: str, atypes: list[str]) -> str:
         if not len(ptypes) == len(atypes):
             raise TypeError(
                 f"Parameter count mismatch: expected {len(ptypes)}, got {len(atypes)}"
@@ -119,6 +119,15 @@ class TypeEnv:
                 raise TypeError(
                     f"Parameter count mismatch: argument {i}: Can't convert argument of type {atype} to {ptype}"
                 )
+        return rtype
+
+    def check_json_expr(self, idx_types: list[str], rtype: str) -> str:
+        for i, idx_type in enumerate(idx_types, 1):
+            if not (
+                self.is_convertable_to(idx_type, "int")
+                or self.is_convertable_to(idx_type, "str")
+            ):
+                raise TypeError(f"Index expressions {i} is not of type int or str")
         return rtype
 
     def check_assign(self, ltype: str, rtype: str):
@@ -159,6 +168,8 @@ def get_type(node: AstNode) -> str:
                     return var.type.name
                 case BuiltinFunc() as fn:
                     return fn.type
+                case BuiltinConst() as const:
+                    return const.type
                 case _:
                     raise RuntimeError(f"Unknown type {obj=}")
         case UnaryExpr() as expr:
@@ -170,6 +181,8 @@ def get_type(node: AstNode) -> str:
         case FuncCall() as call:
             assert call.type is not None
             return call.type
+        case JsonExpr() as expr:
+            return expr.type.name
         case _ as unexpected:
             raise CompilerError(f"Unexpected expression type: {unexpected=}")
 
@@ -194,10 +207,18 @@ def check_type(node: AstNode, env: TypeEnv):
                 atypes = [get_type(arg) for arg in call.args]
                 match call.func.value():
                     case BuiltinFunc() as fn:
-                        rtype = env.check_call(fn.ptypes, fn.rtype, atypes)
+                        rtype = env.check_func_call(fn.ptypes, fn.rtype, atypes)
                         call.type = rtype
                     case _ as unexpected:
                         raise TypeError(f"{unexpected} is not callable")
+            case JsonExpr() as expr:
+                jvar_type = get_type(expr.jvar)
+                if jvar_type != "json":
+                    raise TypeError(
+                        f"Objects of type {jvar_type} don't support indexing"
+                    )
+                idx_types = [get_type(idx) for idx in expr.idxs]
+                env.check_json_expr(idx_types, expr.type.name)
             case AssignmentStmt() as stmt:
                 obj = stmt.lvalue.value()
                 match obj:
@@ -208,7 +229,7 @@ def check_type(node: AstNode, env: TypeEnv):
                         rtype = get_type(stmt.rvalue)
                         env.check_assign(ltype, rtype)
                     case _:
-                        raise CompilerError(f"Unknown lvalue type: {obj=}")
+                        raise TypeError(f"Object {obj} can't be assigned to")
             case UpdateStmt() as stmt:
                 obj = stmt.lvalue.value()
                 match obj:
@@ -219,7 +240,7 @@ def check_type(node: AstNode, env: TypeEnv):
                         rtype = get_type(stmt.rvalue)
                         env.check_update(stmt.op, ltype, rtype)
                     case _:
-                        raise CompilerError(f"Unknown lvalue type: {obj=}")
+                        raise TypeError(f"Object {obj} can't be updated")
             case IfStmt() as stmt:
                 cond_type = get_type(stmt.condition)
                 if not env.is_convertable_to(cond_type, "float"):
