@@ -5,13 +5,7 @@
 {{ lvalue }} {{ op }} {{ rvalue }} ;
 
 {#- name: "print_stmt" -#}
-{% for arg in args %}
-{% if loop.last %}
-std::print("{}\n", {{ arg }});
-{% else %}
-std::print("{} ", {{ arg }});
-{% endif %}
-{% endfor %}
+fmt::println("{{ format_string }}", {{ args | join(", ") }}) ;
 
 {#- name: "else_section" -#}
 else {
@@ -39,8 +33,10 @@ if ({{ condition }}) {
 {{ else_ }}
 
 {#- name: "main.cpp" -#}
-#include <print>
 #include <cmath>
+#include <cstdint>
+
+#include <fmt/base.h>
 
 int main(int argc, char* argv[]) {
     {% for var, type, init in lvars %}
@@ -78,13 +74,15 @@ include(FetchContent)
 FetchContent_Declare(
   fmt
   SYSTEM
+  EXCLUDE_FROM_ALL
   GIT_REPOSITORY https://github.com/fmtlib/fmt.git
-  GIT_TAG 11.2.0
+  GIT_TAG 12.0.0
   GIT_SHALLOW TRUE
   GIT_PROGRESS TRUE)
 FetchContent_Declare(
   argparse
   SYSTEM
+  EXCLUDE_FROM_ALL
   GIT_REPOSITORY https://github.com/p-ranav/argparse.git
   GIT_TAG v3.2
   GIT_SHALLOW TRUE
@@ -92,8 +90,17 @@ FetchContent_Declare(
 FetchContent_Declare(
   phmap
   SYSTEM
+  EXCLUDE_FROM_ALL
   GIT_REPOSITORY https://github.com/greg7mdp/parallel-hashmap.git
   GIT_TAG v2.0.0
+  GIT_SHALLOW TRUE
+  GIT_PROGRESS TRUE)
+FetchContent_Declare(
+  json
+  SYSTEM
+  EXCLUDE_FROM_ALL
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG v3.12.0
   GIT_SHALLOW TRUE
   GIT_PROGRESS TRUE)
 FetchContent_Declare(
@@ -101,10 +108,10 @@ FetchContent_Declare(
   SYSTEM
   EXCLUDE_FROM_ALL
   GIT_REPOSITORY https://github.com/duckdb/duckdb.git
-  GIT_TAG v1.3.2
+  GIT_TAG v1.4.1
   GIT_SHALLOW TRUE
   GIT_PROGRESS TRUE)
-FetchContent_MakeAvailable(fmt argparse phmap duckdb)
+FetchContent_MakeAvailable(fmt argparse phmap json duckdb)
 
 find_package(OpenMP REQUIRED)
 
@@ -124,6 +131,7 @@ target_link_libraries(main
     fmt::fmt
     argparse::argparse
     phmap
+    nlohmann_json::nlohmann_json
     duckdb
     OpenMP::OpenMP_CXX)
 target_compile_features(main PRIVATE cxx_std_23)

@@ -107,7 +107,9 @@ def render(
 
 
 @overload
-def render(template: Literal["openmp-cpu:print_stmt"], *, args: list[str]) -> str: ...
+def render(
+    template: Literal["openmp-cpu:print_stmt"], *, format_string: str, args: list[str]
+) -> str: ...
 
 
 @overload

@@ -103,7 +103,8 @@ def codegen_openmp_cpu(node: AstNode) -> str:
             )
         case PrintStmt() as stmt:
             args = [codegen_expr(arg) for arg in stmt.args]
-            return render("openmp-cpu:print_stmt", args=args)
+            format_string = " ".join(["{}"] * len(args))
+            return render("openmp-cpu:print_stmt", format_string=format_string, args=args)
         case ElseSection() as stmt:
             stmts = [codegen_openmp_cpu(stmt) for stmt in stmt.stmts]
             return render("openmp-cpu:else_section", stmts=stmts)
