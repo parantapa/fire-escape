@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import networkx as nx
 
 from .ast_nodes import *
+from .builtins import *
 from .error import *
 
 
@@ -108,6 +109,18 @@ class TypeEnv:
         else:
             raise CompilerError(f"Unexpected binary operator: {op}")
 
+    def check_call(self, ptypes: list[str], rtype: str, atypes: list[str]) -> str:
+        if not len(ptypes) == len(atypes):
+            raise TypeError(
+                f"Parameter count mismatch: expected {len(ptypes)}, got {len(atypes)}"
+            )
+        for i, (ptype, atype) in enumerate(zip(ptypes, atypes), 1):
+            if not self.is_convertable_to(atype, ptype):
+                raise TypeError(
+                    f"Parameter count mismatch: argument {i}: Can't convert argument of type {atype} to {ptype}"
+                )
+        return rtype
+
     def check_assign(self, ltype: str, rtype: str):
         if not self.is_convertable_to(rtype, ltype):
             raise TypeError(
@@ -144,6 +157,8 @@ def get_type(node: AstNode) -> str:
             match obj:
                 case LocalVariable() as var:
                     return var.type.name
+                case BuiltinFunc() as fn:
+                    return fn.type
                 case _:
                     raise RuntimeError(f"Unknown type {obj=}")
         case UnaryExpr() as expr:
@@ -152,6 +167,9 @@ def get_type(node: AstNode) -> str:
         case BinaryExpr() as expr:
             assert expr.type is not None
             return expr.type
+        case FuncCall() as call:
+            assert call.type is not None
+            return call.type
         case _ as unexpected:
             raise CompilerError(f"Unexpected expression type: {unexpected=}")
 
@@ -172,6 +190,14 @@ def check_type(node: AstNode, env: TypeEnv):
                 type1 = get_type(expr.left)
                 type2 = get_type(expr.right)
                 expr.type = env.check_binary(expr.op, type1, type2)
+            case FuncCall() as call:
+                atypes = [get_type(arg) for arg in call.args]
+                match call.func.value():
+                    case BuiltinFunc() as fn:
+                        rtype = env.check_call(fn.ptypes, fn.rtype, atypes)
+                        call.type = rtype
+                    case _ as unexpected:
+                        raise TypeError(f"{unexpected} is not callable")
             case AssignmentStmt() as stmt:
                 obj = stmt.lvalue.value()
                 match obj:

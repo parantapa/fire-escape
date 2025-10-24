@@ -11,7 +11,9 @@ __all__ = [
     "UnaryExpr",
     "BinaryExpr",
     "Ref",
+    "FuncCall",
     "TypeRef",
+    "PassStmt",
     "AssignmentStmt",
     "UpdateStmt",
     "PrintStmt",
@@ -25,6 +27,8 @@ __all__ = [
 from dataclasses import dataclass, field
 from collections import ChainMap
 from typing import Any
+
+from .error import *
 
 
 @dataclass
@@ -64,7 +68,11 @@ class Ref(AstNode):
 
     def value(self) -> Any:
         assert self.scope is not None
-        return self.scope[self.name]
+
+        try:
+            return self.scope[self.name]
+        except KeyError:
+            raise ReferenceError(f"{self.name} not defined")
 
 
 @dataclass
@@ -82,7 +90,14 @@ class BinaryExpr(AstNode):
     type: str | None = field(default=None)
 
 
-Expression = Literal | Ref | UnaryExpr | BinaryExpr
+@dataclass
+class FuncCall(AstNode):
+    func: Ref
+    args: list[Expression]
+    type: str | None = field(default=None)
+
+
+Expression = Literal | Ref | UnaryExpr | BinaryExpr | FuncCall
 
 
 @dataclass

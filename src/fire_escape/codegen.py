@@ -1,7 +1,7 @@
 """Code generation."""
 
 from .ast_nodes import *
-from .ast_nodes import PassStmt
+from .builtins import *
 from .error import CompilerError
 from .templates import render
 
@@ -31,6 +31,10 @@ TYPE_TO_CTYPE = {
     "f64": "double",
 
     "str": "std::string",
+}
+
+BUILTIN_FN_NAME = {
+    "sqrt": "std::sqrt"
 }
 # fmt: on
 
@@ -68,6 +72,15 @@ def codegen_expr(node: AstNode) -> str:
                 return f"std::pow( ({left}), ({right}) )"
             else:
                 return f"( ({left}) {expr.op} ({right}) )"
+        case FuncCall() as call:
+            args = [codegen_expr(arg) for arg in call.args]
+            args = ", ".join(args)
+            match call.func.value():
+                case BuiltinFunc() as fn:
+                    func = BUILTIN_FN_NAME[fn.name]
+                    return f"{func}({args})"
+                case _ as unexpected:
+                    raise CompilerError(f"unexpected function value {unexpected=}")
 
     raise CompilerError(f"unexpected node type {node=}")
 

@@ -18,6 +18,8 @@ str: ESCAPED_STRING
 ref: CNAME
 !type: "const"? CNAME
 
+func_call: ref "(" _NEWLINE? [ expression ( "," _NEWLINE? expression )* _NEWLINE? ]  ")"
+
 ?expression: binary_or
 ?!binary_or: binary_and ( "or" binary_and )*
 ?!binary_and: unary_not ( "and" unary_not )*
@@ -33,8 +35,8 @@ ref: CNAME
      | float
      | str
      | ref
+     | func_call
      | "(" _NEWLINE? expression _NEWLINE? ")"
-
 
 !pass_stmt: "pass" _STMT_END
 assignment_stmt: ref ( ":" type )? "=" expression _STMT_END

@@ -10,9 +10,9 @@ from typing import Any
 from lark import Lark, Transformer
 
 from .ast_nodes import *
-from .ast_nodes import PassStmt
 from .error import *
 from .type_check import check_type, TypeEnv
+from .builtins import add_builtins
 
 GRAMMAR_ANCHOR = __name__
 GRAMMAR_FILE = "ffsl.lark"
@@ -62,9 +62,6 @@ class AstTransformer(Transformer):
         name = child.value
         return Ref(name=name, line=child.line, col=child.column, children=[])
 
-    # def primary(self, children):
-    #     return children[0]
-
     def _unary(self, children):
         match children:
             case [op, arg]:
@@ -99,6 +96,12 @@ class AstTransformer(Transformer):
     binary_add = _binary_left_assoc
     binary_cmp = _binary_left_assoc
     binary_and = _binary_left_assoc
+
+    def func_call(self, children):
+        func, *args = children
+        return FuncCall(
+            func=func, args=args, line=func.line, col=func.col, children=children
+        )
 
     def type(self, children):
         match children:
@@ -272,6 +275,9 @@ def parse(text: str):
     source: Source = AstTransformer().transform(tree)
     build_scope(source, None)
     collect_local_varaibles(source)
+
+    assert source.scope is not None
+    add_builtins(source.scope)
 
     env = TypeEnv.new()
     check_type(source, env)

@@ -17,7 +17,7 @@ elif x < 20:
 elif x < 10:
     pass
 else:
-    x = 20
+    z = sqrt(20)
 end
 
 print("Hello, World", 10)
