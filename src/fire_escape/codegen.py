@@ -107,26 +107,40 @@ def codegen_openmp_cpu(node: AstNode) -> str:
         case AssignmentStmt() as stmt:
             lvalue = codegen_expr(stmt.lvalue)
             rvalue = codegen_expr(stmt.rvalue)
-            return render("openmp-cpu:assignment_stmt", lvalue=lvalue, rvalue=rvalue)
+            return render(
+                "openmp-cpu:assignment_stmt", lvalue=lvalue, rvalue=rvalue, pos=stmt.pos
+            )
         case UpdateStmt() as stmt:
             lvalue = codegen_expr(stmt.lvalue)
             rvalue = codegen_expr(stmt.rvalue)
             return render(
-                "openmp-cpu:update_stmt", lvalue=lvalue, op=stmt.op, rvalue=rvalue
+                "openmp-cpu:update_stmt",
+                lvalue=lvalue,
+                op=stmt.op,
+                rvalue=rvalue,
+                pos=stmt.pos,
             )
         case PrintStmt() as stmt:
             args = [codegen_expr(arg) for arg in stmt.args]
             format_string = " ".join(["{}"] * len(args))
             return render(
-                "openmp-cpu:print_stmt", format_string=format_string, args=args
+                "openmp-cpu:print_stmt",
+                format_string=format_string,
+                args=args,
+                pos=stmt.pos,
             )
         case ElseSection() as stmt:
             stmts = [codegen_openmp_cpu(stmt) for stmt in stmt.stmts]
-            return render("openmp-cpu:else_section", stmts=stmts)
+            return render("openmp-cpu:else_section", stmts=stmts, pos=stmt.pos)
         case ElifSection() as stmt:
             condition = codegen_expr(stmt.condition)
             stmts = [codegen_openmp_cpu(stmt) for stmt in stmt.stmts]
-            return render("openmp-cpu:elif_section", condition=condition, stmts=stmts)
+            return render(
+                "openmp-cpu:elif_section",
+                condition=condition,
+                stmts=stmts,
+                pos=stmt.pos,
+            )
         case IfStmt() as stmt:
             condition = codegen_expr(stmt.condition)
             stmts = [codegen_openmp_cpu(stmt) for stmt in stmt.stmts]
@@ -142,6 +156,7 @@ def codegen_openmp_cpu(node: AstNode) -> str:
                 stmts=stmts,
                 elifs=elifs,
                 else_=else_,
+                pos=stmt.pos,
             )
         case Source() as source:
             lvars = []

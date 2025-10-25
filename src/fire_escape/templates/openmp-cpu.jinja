@@ -1,13 +1,17 @@
 {#- name: "assignment_stmt" -#}
+#line {{ pos.line }} "{{ pos.file }}"
 {{ lvalue }} = {{ rvalue }} ;
 
 {#- name: "update_stmt" -#}
+#line {{ pos.line }} "{{ pos.file }}"
 {{ lvalue }} {{ op }} {{ rvalue }} ;
 
 {#- name: "print_stmt" -#}
+#line {{ pos.line }} "{{ pos.file }}"
 fmt::println("{{ format_string }}", {{ args | join(", ") }}) ;
 
 {#- name: "else_section" -#}
+#line {{ pos.line }} "{{ pos.file }}"
 else {
     {% for stmt in stmts %}
     {{ stmt | indent }}
@@ -15,6 +19,7 @@ else {
 }
 
 {#- name: "elif_section" -#}
+#line {{ pos.line }} "{{ pos.file }}"
 else if ({{ condition }}) {
     {% for stmt in stmts %}
     {{ stmt | indent }}
@@ -22,6 +27,7 @@ else if ({{ condition }}) {
 }
 
 {#- name: "if_stmt" -#}
+#line {{ pos.line }} "{{ pos.file }}"
 if ({{ condition }}) {
     {% for stmt in stmts %}
     {{ stmt | indent }}

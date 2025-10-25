@@ -8,6 +8,8 @@ import importlib.resources
 import json5
 import jinja2
 
+from ..error import Position
+
 
 @dataclass(frozen=True, slots=True)
 class TemplateText:
@@ -96,31 +98,48 @@ _ENVIRONMENT = jinja2.Environment(
 
 @overload
 def render(
-    template: Literal["openmp-cpu:assignment_stmt"], *, lvalue: str, rvalue: str
+    template: Literal["openmp-cpu:assignment_stmt"],
+    *,
+    lvalue: str,
+    rvalue: str,
+    pos: Position,
 ) -> str: ...
 
 
 @overload
 def render(
-    template: Literal["openmp-cpu:update_stmt"], *, lvalue: str, op: str, rvalue: str
+    template: Literal["openmp-cpu:update_stmt"],
+    *,
+    lvalue: str,
+    op: str,
+    rvalue: str,
+    pos: Position,
 ) -> str: ...
 
 
 @overload
 def render(
-    template: Literal["openmp-cpu:print_stmt"], *, format_string: str, args: list[str]
+    template: Literal["openmp-cpu:print_stmt"],
+    *,
+    format_string: str,
+    args: list[str],
+    pos: Position,
 ) -> str: ...
 
 
 @overload
 def render(
-    template: Literal["openmp-cpu:else_section"], *, stmts: list[str]
+    template: Literal["openmp-cpu:else_section"], *, stmts: list[str], pos: Position
 ) -> str: ...
 
 
 @overload
 def render(
-    template: Literal["openmp-cpu:elif_section"], *, condition: str, stmts: list[str]
+    template: Literal["openmp-cpu:elif_section"],
+    *,
+    condition: str,
+    stmts: list[str],
+    pos: Position,
 ) -> str: ...
 
 
@@ -132,6 +151,7 @@ def render(
     stmts: list[str],
     elifs: list[str],
     else_: str,
+    pos: Position,
 ) -> str: ...
 
 
