@@ -91,7 +91,11 @@ def codegen_expr(node: AstNode) -> str:
             match expr.jvar.value():
                 case BuiltinConst() as const:
                     cname = const.name
-                    return f"{cname}{idxs}.template get<{rtype}>()"
+                    expr_str = f"{cname}{idxs}.template get<{rtype}>()"
+                    expr_str = render(
+                        "openmp-cpu:json_expr", expr=expr_str, pos=expr.pos
+                    )
+                    return " ".join(expr_str.split())
                 case _ as unexpected:
                     raise CompilerError(f"unexpected json variable {unexpected=}")
 
