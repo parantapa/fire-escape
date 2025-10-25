@@ -251,6 +251,5 @@ def check_type(node: AstNode, env: TypeEnv):
                     raise TypeError("Condition expression type not boolean or numeric")
 
     except CodeError as e:
-        e.line = node.line if e.line is None else e.line
-        e.col = node.col if e.col is None else e.col
+        e.pos = node.pos if e.pos is None else e.pos
         raise e

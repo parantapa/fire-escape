@@ -34,8 +34,7 @@ from .error import *
 
 @dataclass
 class AstNode:
-    line: int = field(repr=False, compare=False)
-    col: int = field(repr=False, compare=False)
+    pos: Position = field(repr=False, compare=False)
     children: list[AstNode] = field(repr=False, compare=False)
 
 

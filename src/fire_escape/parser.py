@@ -5,9 +5,10 @@ from __future__ import annotations
 import importlib.resources
 from functools import cache
 from collections import ChainMap
-from typing import Any
+from typing import Any, cast
+from pathlib import Path
 
-from lark import Lark, Transformer
+from lark import Lark, Tree, Token
 
 from .ast_nodes import *
 from .error import *
@@ -33,206 +34,187 @@ def get_parser() -> Lark:
     raise CompilerError("Unable to create parser.")
 
 
-class AstTransformer(Transformer):
-    def true(self, children):
-        child = children[0]
-        return Bool(value=True, line=child.line, col=child.column, children=[])
+def _unary(children, pos):
+    match children:
+        case [op, arg]:
+            return UnaryExpr(op=op.value, arg=arg, pos=pos, children=[arg])
+        case [arg]:
+            return arg
+        case _ as unexpected:
+            raise CompilerError(f"Unexpected unary expression: {unexpected=}")
 
-    def false(self, children):
-        child = children[0]
-        return Bool(value=False, line=child.line, col=child.column, children=[])
 
-    def int(self, children):
-        child = children[0]
-        value = int(child.value)
-        return Int(value=value, line=child.line, col=child.column, children=[])
+def _binary_left_assoc(children, pos):
+    if len(children) == 1:
+        return children[0]
+    else:
+        *left, op, right = children
+        left = _binary_left_assoc(left, pos)
+        return BinaryExpr(
+            left=left,
+            op=op.value,
+            right=right,
+            pos=pos,
+            children=[left, right],
+        )
 
-    def float(self, children):
-        child = children[0]
-        value = float(child.value)
-        return Float(value=value, line=child.line, col=child.column, children=[])
 
-    def str(self, children):
-        child = children[0]
-        value = child.value.lstrip('"').rstrip('"')
-        return Str(value=value, line=child.line, col=child.column, children=[])
+def build_ast(tree: Tree, file: str):
+    children = [
+        build_ast(child, file) if isinstance(child, Tree) else child
+        for child in tree.children
+    ]
+    pos = Position(file=file, line=tree.meta.line, col=tree.meta.column)
 
-    def ref(self, children):
-        child = children[0]
-        name = child.value
-        return Ref(name=name, line=child.line, col=child.column, children=[])
+    match tree.data:
+        case "true":
+            return Bool(value=True, pos=pos, children=[])
 
-    def _unary(self, children):
-        match children:
-            case [op, arg]:
-                return UnaryExpr(
-                    op=op.value, arg=arg, line=op.line, col=op.column, children=[arg]
-                )
-            case [arg]:
-                return arg
-            case _ as unexpected:
-                raise CompilerError(f"Unexpected unary expression: {unexpected=}")
+        case "false":
+            return Bool(value=False, pos=pos, children=[])
 
-    def _binary_left_assoc(self, children):
-        if len(children) == 1:
-            return children[0]
-        else:
-            *left, op, right = children
-            left = self._binary_left_assoc(left)
-            return BinaryExpr(
-                left=left,
-                op=op.value,
-                right=right,
-                line=left.line,
-                col=left.col,
-                children=[left, right],
+        case "int":
+            (child,) = children
+            value = int(child.value)
+            return Int(value=value, pos=pos, children=[])
+
+        case "float":
+            (child,) = children
+            value = float(child.value)
+            return Float(value=value, pos=pos, children=[])
+
+        case "str":
+            (child,) = children
+            child = cast(Token, child)
+            value = child.value.lstrip('"').rstrip('"')
+            return Str(value=value, pos=pos, children=[])
+
+        case "ref":
+            (child,) = children
+            name = child.value
+            return Ref(name=name, pos=pos, children=[])
+
+        case "unary_neg" | "unary_not":
+            return _unary(children, pos)
+
+        case "binary_exp" | "binary_mul" | "binary_add" | "binary_cmp" | "binary_and":
+            return _binary_left_assoc(children, pos)
+
+        case "func_call":
+            func, *args = children
+            return FuncCall(func=func, args=args, pos=pos, children=children)
+
+        case "json_expr":
+            jvar, *idxs, type = children
+            return JsonExpr(
+                jvar=jvar,
+                idxs=idxs,
+                type=type,
+                pos=pos,
+                children=children,
             )
 
-    unary_neg = _unary
-    unary_not = _unary
+        case "type":
+            match children:
+                case [op, name]:
+                    return TypeRef(
+                        is_const=True,
+                        name=name.value,
+                        pos=pos,
+                        children=[],
+                    )
+                case [name]:
+                    return TypeRef(
+                        is_const=False,
+                        name=name.value,
+                        pos=pos,
+                        children=[],
+                    )
+                case _ as unexpected:
+                    raise CompilerError(f"Unexpected type: {unexpected=}")
 
-    binary_exp = _binary_left_assoc
-    binary_mul = _binary_left_assoc
-    binary_add = _binary_left_assoc
-    binary_cmp = _binary_left_assoc
-    binary_and = _binary_left_assoc
+        case "pass_stmt":
+            return PassStmt(pos=pos, children=[])
 
-    def func_call(self, children):
-        func, *args = children
-        return FuncCall(
-            func=func, args=args, line=func.line, col=func.col, children=children
-        )
+        case "assignment_stmt":
+            match children:
+                case [lvalue, type, rvalue]:
+                    var = LocalVariable(
+                        name=lvalue.name,
+                        type=type,
+                        pos=pos,
+                        children=[type],
+                    )
+                    return AssignmentStmt(
+                        lvalue=lvalue,
+                        rvalue=rvalue,
+                        var=var,
+                        pos=pos,
+                        children=[lvalue, rvalue, var],
+                    )
+                case [lvalue, rvalue]:
+                    return AssignmentStmt(
+                        lvalue=lvalue,
+                        rvalue=rvalue,
+                        var=None,
+                        pos=pos,
+                        children=[lvalue, rvalue],
+                    )
+                case _ as unexpected:
+                    raise CompilerError(f"Unexpected assignment_stmt: {unexpected=}")
 
-    def json_expr(self, children):
-        jvar, *idxs, type = children
-        return JsonExpr(
-            jvar=jvar,
-            idxs=idxs,
-            type=type,
-            line=jvar.line,
-            col=jvar.col,
-            children=children,
-        )
+        case "update_stmt":
+            lvalue, op, rvalue = children
+            return UpdateStmt(
+                lvalue=lvalue,
+                op=op.value,
+                rvalue=rvalue,
+                pos=pos,
+                children=[lvalue, rvalue],
+            )
 
-    def type(self, children):
-        match children:
-            case [op, name]:
-                return TypeRef(
-                    is_const=True,
-                    name=name.value,
-                    line=op.line,
-                    col=op.column,
-                    children=[],
-                )
-            case [name]:
-                return TypeRef(
-                    is_const=False,
-                    name=name.value,
-                    line=name.line,
-                    col=name.column,
-                    children=[],
-                )
-            case _ as unexpected:
-                raise CompilerError(f"Unexpected type: {unexpected=}")
+        case "else_section":
+            return ElseSection(stmts=children, pos=pos, children=children)
 
-    def pass_stmt(self, children):
-        child = children[0]
-        return PassStmt(line=child.line, col=child.column, children=[])
+        case "elif_section":
+            condition, *stmts = children
+            return ElifSection(
+                condition=condition,
+                stmts=stmts,
+                pos=pos,
+                children=children,
+            )
 
-    def assignment_stmt(self, children):
-        match children:
-            case [lvalue, type, rvalue]:
-                var = LocalVariable(
-                    name=lvalue.name,
-                    type=type,
-                    line=lvalue.line,
-                    col=lvalue.col,
-                    children=[type],
-                )
-                return AssignmentStmt(
-                    lvalue=lvalue,
-                    rvalue=rvalue,
-                    var=var,
-                    line=lvalue.line,
-                    col=lvalue.col,
-                    children=[lvalue, rvalue, var],
-                )
-            case [lvalue, rvalue]:
-                return AssignmentStmt(
-                    lvalue=lvalue,
-                    rvalue=rvalue,
-                    var=None,
-                    line=lvalue.line,
-                    col=lvalue.col,
-                    children=[lvalue, rvalue],
-                )
-            case _ as unexpected:
-                raise CompilerError(f"Unexpected assignment_stmt: {unexpected=}")
+        case "if_stmt":
+            condition, *rest = children
+            stmts = []
+            elifs = []
+            else_ = None
+            for obj in rest:
+                match obj:
+                    case ElseSection():
+                        else_ = obj
+                    case ElifSection():
+                        elifs.append(obj)
+                    case _:
+                        stmts.append(obj)
+            return IfStmt(
+                condition=condition,
+                stmts=stmts,
+                elifs=elifs,
+                else_=else_,
+                pos=pos,
+                children=children,
+            )
 
-    def update_stmt(self, children):
-        match children:
-            case [lvalue, op, rvalue]:
-                return UpdateStmt(
-                    lvalue=lvalue,
-                    op=op.value,
-                    rvalue=rvalue,
-                    line=lvalue.line,
-                    col=lvalue.col,
-                    children=[lvalue, rvalue],
-                )
-            case _ as unexpected:
-                raise CompilerError(f"Unexpected assignment_stmt: {unexpected=}")
+        case "print_stmt":
+            return PrintStmt(args=children, pos=pos, children=children)
 
-    def else_section(self, children):
-        child = children[0]
-        return ElseSection(
-            stmts=children, line=child.line, col=child.col, children=children
-        )
+        case "source":
+            return Source(stmts=children, pos=pos, children=children)
 
-    def elif_section(self, children):
-        child = children[0]
-        condition, *stmts = children
-        return ElifSection(
-            condition=condition,
-            stmts=stmts,
-            line=child.line,
-            col=child.col,
-            children=children,
-        )
-
-    def if_stmt(self, children):
-        child = children[0]
-        condition, *rest = children
-        stmts = []
-        elifs = []
-        else_ = None
-        for obj in rest:
-            match obj:
-                case ElseSection():
-                    assert else_ is None
-                    else_ = obj
-                case ElifSection():
-                    elifs.append(obj)
-                case _:
-                    stmts.append(obj)
-        return IfStmt(
-            condition=condition,
-            stmts=stmts,
-            elifs=elifs,
-            else_=else_,
-            line=child.line,
-            col=child.col,
-            children=children,
-        )
-
-    def print_stmt(self, children):
-        child = children[0]
-        args = children
-        return PrintStmt(args=args, line=child.line, col=child.col, children=args)
-
-    def source(self, children):
-        child = children[0]
-        return Source(stmts=children, line=child.line, col=child.col, children=children)
+        case _ as unexpected:
+            raise CompilerError(f"unexpected tree.data={unexpected}; {children=}")
 
 
 def build_scope(node: AstNode, scope: ChainMap[str, Any] | None):
@@ -250,16 +232,14 @@ def build_scope(node: AstNode, scope: ChainMap[str, Any] | None):
                 if var.name in scope.maps[0]:
                     raise ReferenceError(
                         f"{var.name} has already been defined.",
-                        line=var.line,
-                        col=var.col,
+                        pos=var.pos,
                     )
                 scope[var.name] = var
 
         for child in node.children:
             build_scope(child, scope)
     except CodeError as e:
-        e.line = node.line if e.line is None else e.line
-        e.col = node.col if e.col is None else e.col
+        e.pos = node.pos if e.pos is None else e.pos
         raise e
 
 
@@ -275,15 +255,14 @@ def collect_local_varaibles(node: AstNode):
         for child in node.children:
             collect_local_varaibles(child)
     except CodeError as e:
-        e.line = node.line if e.line is None else e.line
-        e.col = node.col if e.col is None else e.col
+        e.pos = node.pos if e.pos is None else e.pos
         raise e
 
 
-def parse(text: str):
+def parse(file: str, text: str):
     parser = get_parser()
     tree = parser.parse(text)
-    source: Source = AstTransformer().transform(tree)
+    source: Source = cast(Source, build_ast(tree, file))
     build_scope(source, None)
     collect_local_varaibles(source)
 
