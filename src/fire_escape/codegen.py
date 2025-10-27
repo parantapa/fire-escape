@@ -149,11 +149,11 @@ def codegen_openmp_cpu(node: AstNode) -> str:
                 pos=stmt.pos,
             )
         case ElseSection() as stmt:
-            stmts = [codegen_openmp_cpu(stmt) for stmt in stmt.stmts]
+            stmts = [codegen_openmp_cpu(stmt) for stmt in stmt.block.stmts]
             return render("openmp-cpu:else_section", stmts=stmts, pos=stmt.pos)
         case ElifSection() as stmt:
             condition = codegen_expr(stmt.condition)
-            stmts = [codegen_openmp_cpu(stmt) for stmt in stmt.stmts]
+            stmts = [codegen_openmp_cpu(stmt) for stmt in stmt.block.stmts]
             return render(
                 "openmp-cpu:elif_section",
                 condition=condition,
@@ -162,7 +162,7 @@ def codegen_openmp_cpu(node: AstNode) -> str:
             )
         case IfStmt() as stmt:
             condition = codegen_expr(stmt.condition)
-            stmts = [codegen_openmp_cpu(stmt) for stmt in stmt.stmts]
+            stmts = [codegen_openmp_cpu(stmt) for stmt in stmt.block.stmts]
             elifs = [codegen_openmp_cpu(section) for section in stmt.elifs]
             else_ = (
                 codegen_openmp_cpu(stmt.else_)
@@ -185,7 +185,7 @@ def codegen_openmp_cpu(node: AstNode) -> str:
                 init = cpp_init(lvar.type.name)
                 lvars.append((var, type, init))
 
-            stmts = [codegen_openmp_cpu(stmt) for stmt in source.stmts]
+            stmts = [codegen_openmp_cpu(stmt) for stmt in source.block.stmts]
             return render("openmp-cpu:main.cpp", stmts=stmts, lvars=lvars)
 
     raise CompilerError(f"unexpected node type {node=}")

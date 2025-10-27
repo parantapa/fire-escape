@@ -23,6 +23,7 @@ __all__ = [
     "ElseSection",
     "Source",
     "LocalVariable",
+    "Block"
 ]
 
 from dataclasses import dataclass, field
@@ -146,7 +147,7 @@ class PrintStmt(AstNode):
 @dataclass
 class IfStmt(AstNode):
     condition: Expression
-    stmts: list[Statement]
+    block: Block
     elifs: list[ElifSection]
     else_: ElseSection | None
 
@@ -154,19 +155,24 @@ class IfStmt(AstNode):
 @dataclass
 class ElifSection(AstNode):
     condition: Expression
-    stmts: list[Statement]
+    block: Block
 
 
 @dataclass
 class ElseSection(AstNode):
-    stmts: list[Statement]
+    block: Block
 
 
 Statement = PassStmt | AssignmentStmt | UpdateStmt | PrintStmt | IfStmt
 
 
 @dataclass
-class Source(AstNode):
+class Block(AstNode):
     stmts: list[Statement]
+
+
+@dataclass
+class Source(AstNode):
+    block: Block
     lvars: list[LocalVariable] = field(default_factory=list, compare=False)
     scope: ChainMap[str, Any] | None = field(default=None, repr=False, compare=False)

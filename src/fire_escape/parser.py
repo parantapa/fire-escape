@@ -173,21 +173,23 @@ def build_ast(tree: Tree, file: str):
                 children=[lvalue, rvalue],
             )
 
+        case "block":
+            return Block(stmts=children, pos=pos, children=children)
+
         case "else_section":
-            return ElseSection(stmts=children, pos=pos, children=children)
+            return ElseSection(block=children[0], pos=pos, children=children)
 
         case "elif_section":
-            condition, *stmts = children
+            condition, block = children
             return ElifSection(
                 condition=condition,
-                stmts=stmts,
+                block=block,
                 pos=pos,
                 children=children,
             )
 
         case "if_stmt":
-            condition, *rest = children
-            stmts = []
+            condition, block, *rest = children
             elifs = []
             else_ = None
             for obj in rest:
@@ -196,11 +198,11 @@ def build_ast(tree: Tree, file: str):
                         else_ = obj
                     case ElifSection():
                         elifs.append(obj)
-                    case _:
-                        stmts.append(obj)
+                    case _ as unexpected:
+                        raise CompilerError(f"{unexpected=}")
             return IfStmt(
                 condition=condition,
-                stmts=stmts,
+                block=block,
                 elifs=elifs,
                 else_=else_,
                 pos=pos,
@@ -211,7 +213,7 @@ def build_ast(tree: Tree, file: str):
             return PrintStmt(args=children, pos=pos, children=children)
 
         case "source":
-            return Source(stmts=children, pos=pos, children=children)
+            return Source(block=children[0], pos=pos, children=children)
 
         case _ as unexpected:
             raise CompilerError(f"unexpected tree.data={unexpected}; {children=}")
