@@ -6,7 +6,6 @@ import importlib.resources
 from functools import cache
 from collections import ChainMap
 from typing import Any, cast
-from pathlib import Path
 
 from lark import Lark, Tree, Token
 
@@ -63,6 +62,7 @@ def build_ast(tree: Tree, file: str):
     children = [
         build_ast(child, file) if isinstance(child, Tree) else child
         for child in tree.children
+        if child is not None
     ]
     pos = Position(file=file, line=tree.meta.line, col=tree.meta.column)
 

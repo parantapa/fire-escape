@@ -43,7 +43,7 @@ json_expr: ref ( "[" _NEWLINE? expression _NEWLINE? "]" )+ ":" type
 !pass_stmt: "pass" _STMT_END
 assignment_stmt: ref ( ":" type )? "=" expression _STMT_END
 !update_stmt: ref ( "+=" | "-=" | "*=" | "/=" ) expression _STMT_END
-print_stmt: "print" "(" expression ( "," expression )* ")" _STMT_END
+print_stmt: "print" "(" [ expression ( "," expression )* ] ")" _STMT_END
 
 if_stmt: "if" expression ":" _NEWLINE? statement+ elif_section* else_section? "end" _STMT_END
 elif_section: "elif" expression ":" _NEWLINE? statement+

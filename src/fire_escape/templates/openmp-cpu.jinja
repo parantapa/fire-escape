@@ -8,7 +8,11 @@
 
 {#- name: "print_stmt" -#}
 #line {{ pos.line }} "{{ pos.file }}"
+{% if args %}
 fmt::println("{{ format_string }}", {{ args | join(", ") }}) ;
+{% else %}
+fmt::println("") ;
+{% endif %}
 
 {#- name: "else_section" -#}
 #line {{ pos.line }} "{{ pos.file }}"
