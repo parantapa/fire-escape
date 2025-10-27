@@ -98,15 +98,6 @@ _ENVIRONMENT = jinja2.Environment(
 
 @overload
 def render(
-    template: Literal["openmp-cpu:json_expr"],
-    *,
-    expr: str,
-    pos: Position,
-) -> str: ...
-
-
-@overload
-def render(
     template: Literal["openmp-cpu:assignment_stmt"],
     *,
     lvalue: str,
