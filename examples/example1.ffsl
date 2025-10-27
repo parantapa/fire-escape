@@ -22,5 +22,5 @@ else:
     z = sqrt(20)
 end
 
-print("Hello, World", 10)
+print("Hello, World", z)
 

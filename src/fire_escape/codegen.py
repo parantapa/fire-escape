@@ -50,6 +50,23 @@ def cpp_init(name: str) -> str:
         return "0"
 
 
+_JSON_EXPR_TEMPLATE = """
+[](){
+    try {
+        return %(expr)s;
+    } catch (const nlohmann::json::exception& e) {
+        throw std::runtime_error(
+            fmt::format(
+                "bad json expression:{}:{}:{}: {}",
+                "%(file)s", %(line)s, %(col)s, e.what()
+            )
+        );
+    }
+}()
+"""
+_JSON_EXPR_TEMPLATE = " ".join(_JSON_EXPR_TEMPLATE.split())
+
+
 def codegen_expr(node: AstNode) -> str:
     match node:
         case Bool() as lit:
@@ -62,40 +79,38 @@ def codegen_expr(node: AstNode) -> str:
             return '"' + lit.value + '"'
         case Ref() as ref:
             return mangle(ref.name)
-        case UnaryExpr() as expr:
-            arg = codegen_expr(expr.arg)
-            return f"( {expr.op} ({arg}) )"
-        case BinaryExpr() as expr:
-            left = codegen_expr(expr.left)
-            right = codegen_expr(expr.right)
-            if expr.op == "**":
+        case UnaryExpr(op=op, arg=arg):
+            arg = codegen_expr(arg)
+            return f"( {op} ({arg}) )"
+        case BinaryExpr(left=left, op=op, right=right):
+            left = codegen_expr(left)
+            right = codegen_expr(right)
+            if op == "**":
                 return f"std::pow( ({left}), ({right}) )"
             else:
-                return f"( ({left}) {expr.op} ({right}) )"
-        case FuncCall() as call:
-            args = [codegen_expr(arg) for arg in call.args]
+                return f"( ({left}) {op} ({right}) )"
+        case FuncCall(func=func, args=args):
+            args = [codegen_expr(arg) for arg in args]
             args = ", ".join(args)
-            match call.func.value():
+            match func.value():
                 case BuiltinFunc() as fn:
                     func = BUILTIN_FN_NAME[fn.name]
                     return f"{func}({args})"
                 case _ as unexpected:
                     raise CompilerError(f"unexpected function value {unexpected=}")
-        case JsonExpr() as expr:
-            idxs = [codegen_expr(idx) for idx in expr.idxs]
+        case JsonExpr(jvar=jvar, idxs=idxs, type=rtype, pos=pos):
+            idxs = [codegen_expr(idx) for idx in idxs]
             idxs = [f"[{idx}]" for idx in idxs]
             idxs = "".join(idxs)
 
-            rtype = cpp_type(expr.type.name)
+            rtype = cpp_type(rtype.name)
 
-            match expr.jvar.value():
-                case BuiltinConst() as const:
-                    cname = const.name
+            match jvar.value():
+                case BuiltinConst(name=cname):
                     expr_str = f"{cname}{idxs}.template get<{rtype}>()"
-                    expr_str = render(
-                        "openmp-cpu:json_expr", expr=expr_str, pos=expr.pos
+                    return _JSON_EXPR_TEMPLATE % dict(
+                        expr=expr_str, file=pos.file, line=pos.line, col=pos.col
                     )
-                    return " ".join(expr_str.split())
                 case _ as unexpected:
                     raise CompilerError(f"unexpected json variable {unexpected=}")
 
@@ -104,7 +119,7 @@ def codegen_expr(node: AstNode) -> str:
 
 def codegen_openmp_cpu(node: AstNode) -> str:
     match node:
-        case Bool() | Int() | Float() | Str() | Ref() | UnaryExpr() | BinaryExpr():
+        case Bool() | Int() | Float() | Str() | Ref() | UnaryExpr() | BinaryExpr() | JsonExpr():
             return codegen_expr(node)
         case PassStmt() as stmt:
             return "// pass"

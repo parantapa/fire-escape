@@ -55,13 +55,32 @@ if ({{ condition }}) {
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
+#include <fstream>
 
 #include <fmt/format.h>
 #include <nlohmann/json.hpp>
+#include <argparse/argparse.hpp>
 
 nlohmann::json CONFIG;
 
 int main(int argc, char* argv[]) {
+    argparse::ArgumentParser program(argv[0]);
+    program.add_argument("--config").help("Configuration file (JSON)");
+
+    try {
+        program.parse_args(argc, argv);
+    } catch (const std::exception& err) {
+        std::cerr << err.what() << std::endl;
+        std::cerr << program;
+        std::exit(1);
+    }
+
+    auto config_file_opt = program.present<std::string>("--config");
+    if (config_file_opt) {
+        std::ifstream config_stream(*config_file_opt);
+        CONFIG = nlohmann::json::parse(config_stream);
+    }
+
     {% for var, type, init in lvars %}
     {{ type }} {{ var }} = {{ init }} ;
     {% endfor %}
