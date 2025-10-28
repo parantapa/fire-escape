@@ -117,9 +117,18 @@ def codegen_expr(node: AstNode) -> str:
     raise CompilerError(f"unexpected node type {node=}")
 
 
-def codegen_openmp_cpu(node: AstNode) -> str:
+def codegen_openmp_cpu(node: AstNode | tuple[Func, str]) -> str:
     match node:
-        case Bool() | Int() | Float() | Str() | Ref() | UnaryExpr() | BinaryExpr() | JsonExpr():
+        case (
+            Bool()
+            | Int()
+            | Float()
+            | Str()
+            | Ref()
+            | UnaryExpr()
+            | BinaryExpr()
+            | JsonExpr()
+        ):
             return codegen_expr(node)
         case PassStmt() as stmt:
             return "// pass"
@@ -146,6 +155,16 @@ def codegen_openmp_cpu(node: AstNode) -> str:
                 "openmp-cpu:print_stmt",
                 format_string=format_string,
                 args=args,
+                pos=stmt.pos,
+            )
+        case ReturnStmt() as stmt:
+            if stmt.arg:
+                arg = codegen_expr(stmt.arg)
+            else:
+                arg = None
+            return render(
+                "openmp-cpu:return_stmt",
+                arg=arg,
                 pos=stmt.pos,
             )
         case ElseSection() as stmt:
@@ -177,15 +196,43 @@ def codegen_openmp_cpu(node: AstNode) -> str:
                 else_=else_,
                 pos=stmt.pos,
             )
-        case Source() as source:
+        case [Func() as fn, "decl"]:
+            rtype = "void" if fn.rtype is None else cpp_type(fn.rtype.name)
+            name = mangle(fn.name)
+            ptypes = [cpp_type(param.type.name) for param in fn.params]
+            return render("openmp-cpu:func_decl", name=name, ptypes=ptypes, rtype=rtype)
+        case [Func() as fn, "defn"]:
+            rtype = "void" if fn.rtype is None else cpp_type(fn.rtype.name)
+            name = mangle(fn.name)
+
+            params = [(cpp_type(param.type.name), param.name) for param in fn.params]
+            params = ["%s %s" % p for p in params]
+
             lvars = []
-            for lvar in source.lvars:
+            for lvar in fn.lvars:
                 var = mangle(lvar.name)
                 type = cpp_type(lvar.type.name)
                 init = cpp_init(lvar.type.name)
                 lvars.append((var, type, init))
 
-            stmts = [codegen_openmp_cpu(stmt) for stmt in source.block.stmts]
-            return render("openmp-cpu:main.cpp", stmts=stmts, lvars=lvars)
+            stmts = [codegen_openmp_cpu(stmt) for stmt in fn.block.stmts]
+
+            return render(
+                "openmp-cpu:func_defn",
+                name=name,
+                params=params,
+                rtype=rtype,
+                lvars=lvars,
+                stmts=stmts,
+            )
+        case Source() as source:
+            fn_decls = []
+            fn_defns = []
+
+            for fn in source.funcs:
+                fn_decls.append(codegen_openmp_cpu((fn, "decl")))
+                fn_defns.append(codegen_openmp_cpu((fn, "defn")))
+
+            return render("openmp-cpu:main.cpp", fn_decls=fn_decls, fn_defns=fn_defns)
 
     raise CompilerError(f"unexpected node type {node=}")

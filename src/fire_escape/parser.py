@@ -40,7 +40,7 @@ def _unary(children, pos):
         case [arg]:
             return arg
         case _ as unexpected:
-            raise CompilerError(f"Unexpected unary expression: {unexpected=}")
+            raise CompilerError(f"{unexpected=}")
 
 
 def _binary_left_assoc(children, pos):
@@ -131,7 +131,7 @@ def build_ast(tree: Tree, file: str):
                         children=[],
                     )
                 case _ as unexpected:
-                    raise CompilerError(f"Unexpected type: {unexpected=}")
+                    raise CompilerError(f"{unexpected=}")
 
         case "pass_stmt":
             return PassStmt(pos=pos, children=[])
@@ -161,7 +161,7 @@ def build_ast(tree: Tree, file: str):
                         children=[lvalue, rvalue],
                     )
                 case _ as unexpected:
-                    raise CompilerError(f"Unexpected assignment_stmt: {unexpected=}")
+                    raise CompilerError(f"{unexpected=}")
 
         case "update_stmt":
             lvalue, op, rvalue = children
@@ -212,8 +212,54 @@ def build_ast(tree: Tree, file: str):
         case "print_stmt":
             return PrintStmt(args=children, pos=pos, children=children)
 
+        case "return_stmt":
+            if children:
+                return ReturnStmt(arg=children[0], pos=pos, children=children)
+            else:
+                return ReturnStmt(arg=None, pos=pos, children=[])
+
+        case "param":
+            name, type = children
+            return Parameter(name=name.value, type=type, pos=pos, children=children)
+
+        case "func":
+            name, *rest = children
+            name = name.value
+
+            params = []
+            rtype = None
+            block = None
+            for obj in rest:
+                match obj:
+                    case Parameter():
+                        params.append(obj)
+                    case TypeRef():
+                        assert rtype is None
+                        rtype = obj
+                    case Block():
+                        assert block is None
+                        block = obj
+                    case _ as unexpected:
+                        raise CompilerError(f"{unexpected=}")
+
+            assert block is not None
+
+            children = list(params)
+            if rtype is not None:
+                children.append(rtype)
+            children.append(block)
+
+            return Func(
+                name=name,
+                params=params,
+                rtype=rtype,
+                block=block,
+                pos=pos,
+                children=children,
+            )
+
         case "source":
-            return Source(block=children[0], pos=pos, children=children)
+            return Source(funcs=children, pos=pos, children=children)
 
         case _ as unexpected:
             raise CompilerError(f"unexpected tree.data={unexpected}; {children=}")
@@ -226,10 +272,22 @@ def build_scope(node: AstNode, scope: ChainMap[str, Any] | None):
                 assert scope is None
                 scope = ChainMap()
                 source.scope = scope
+            case Func() as func:
+                assert scope is not None
+
+                if func.name in scope.maps[0]:
+                    raise ReferenceError(
+                        f"{func.name} has already been defined.",
+                        pos=func.pos,
+                    )
+                scope[func.name] = func
+
+                scope = scope.new_child()
+                func.scope = scope
             case Ref() as ref:
                 assert scope is not None
                 ref.scope = scope
-            case LocalVariable() as var:
+            case LocalVariable() | Parameter() as var:
                 assert scope is not None
                 if var.name in scope.maps[0]:
                     raise ReferenceError(
@@ -243,32 +301,63 @@ def build_scope(node: AstNode, scope: ChainMap[str, Any] | None):
     except CodeError as e:
         e.pos = node.pos if e.pos is None else e.pos
         raise e
+    except CompilerError:
+        raise
+    except Exception as e:
+        raise CompilerError(f"{node=} {scope=}") from e
 
 
 def collect_local_varaibles(node: AstNode):
     try:
         match node:
-            case Source() as source:
-                assert source.scope is not None
-                for var in source.scope.maps[0].values():
+            case Func() as func:
+                assert func.scope is not None
+                for var in func.scope.maps[0].values():
                     if isinstance(var, LocalVariable):
-                        source.lvars.append(var)
+                        func.lvars.append(var)
 
         for child in node.children:
             collect_local_varaibles(child)
     except CodeError as e:
         e.pos = node.pos if e.pos is None else e.pos
         raise e
+    except CompilerError:
+        raise
+    except Exception as e:
+        raise CompilerError(f"{node=}") from e
+
+
+def link_return_statements(node: AstNode, func: Func | None):
+    try:
+        match node:
+            case Func() as func:
+                func = func
+            case ReturnStmt() as stmt:
+                assert func is not None
+                assert stmt.func is None
+                stmt.func = func
+
+        for child in node.children:
+            link_return_statements(child, func)
+    except CodeError as e:
+        e.pos = node.pos if e.pos is None else e.pos
+        raise e
+    except CompilerError:
+        raise
+    except Exception as e:
+        raise CompilerError(f"{node=}") from e
 
 
 def parse(file: str, text: str):
     parser = get_parser()
     tree = parser.parse(text)
     source: Source = cast(Source, build_ast(tree, file))
-    build_scope(source, None)
-    collect_local_varaibles(source)
 
+    build_scope(source, None)
     assert source.scope is not None
+
+    collect_local_varaibles(source)
+    link_return_statements(source, None)
     add_builtins(source.scope)
 
     env = TypeEnv.new()

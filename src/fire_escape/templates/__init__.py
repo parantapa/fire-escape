@@ -1,14 +1,12 @@
 """Jinja 2 Template Utilities."""
 
 from pathlib import Path
-from typing import cast, overload, Literal
+from typing import cast
 from dataclasses import dataclass
 import importlib.resources
 
 import json5
 import jinja2
-
-from ..error import Position
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,78 +94,6 @@ _ENVIRONMENT = jinja2.Environment(
 )
 
 
-@overload
-def render(
-    template: Literal["openmp-cpu:assignment_stmt"],
-    *,
-    lvalue: str,
-    rvalue: str,
-    pos: Position,
-) -> str: ...
-
-
-@overload
-def render(
-    template: Literal["openmp-cpu:update_stmt"],
-    *,
-    lvalue: str,
-    op: str,
-    rvalue: str,
-    pos: Position,
-) -> str: ...
-
-
-@overload
-def render(
-    template: Literal["openmp-cpu:print_stmt"],
-    *,
-    format_string: str,
-    args: list[str],
-    pos: Position,
-) -> str: ...
-
-
-@overload
-def render(
-    template: Literal["openmp-cpu:else_section"], *, stmts: list[str], pos: Position
-) -> str: ...
-
-
-@overload
-def render(
-    template: Literal["openmp-cpu:elif_section"],
-    *,
-    condition: str,
-    stmts: list[str],
-    pos: Position,
-) -> str: ...
-
-
-@overload
-def render(
-    template: Literal["openmp-cpu:if_stmt"],
-    *,
-    condition: str,
-    stmts: list[str],
-    elifs: list[str],
-    else_: str,
-    pos: Position,
-) -> str: ...
-
-
-@overload
-def render(
-    template: Literal["openmp-cpu:main.cpp"],
-    *,
-    stmts: list[str],
-    lvars: list[tuple[str, str, str]],
-) -> str: ...
-
-
-@overload
-def render(template: Literal["openmp-cpu:CMakeLists.txt"], *, module: str) -> str: ...
-
-
-def render(template, **kwargs) -> str:
+def render(template: str, **kwargs) -> str:
     tpl = _ENVIRONMENT.get_template(template)
     return tpl.render(**kwargs)

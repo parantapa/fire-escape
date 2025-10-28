@@ -14,6 +14,14 @@ fmt::println("{{ format_string }}", {{ args | join(", ") }}) ;
 fmt::println("") ;
 {% endif %}
 
+{#- name: "return_stmt" -#}
+#line {{ pos.line }} "{{ pos.file }}"
+{% if arg %}
+return {{ arg }} ;
+{% else %}
+return ;
+{% endif %}
+
 {#- name: "else_section" -#}
 #line {{ pos.line }} "{{ pos.file }}"
 else {
@@ -42,6 +50,20 @@ if ({{ condition }}) {
 {% endfor %}
 {{ else_ }}
 
+{#- name: "func_decl" -#}
+{{ rtype }} {{ name }}( {{ ptypes | join(", ") }} ) ;
+
+{#- name: "func_defn" -#}
+{{ rtype }} {{ name }}( {{ params |  join(", ") }}) {
+    {% for var, type, init in lvars %}
+    {{ type }} {{ var }} = {{ init }} ;
+    {% endfor %}
+
+    {% for stmt in stmts %}
+    {{ stmt | indent }}
+    {% endfor %}
+}
+
 {#- name: "main.cpp" -#}
 #include <cmath>
 #include <cstdint>
@@ -53,6 +75,14 @@ if ({{ condition }}) {
 #include <argparse/argparse.hpp>
 
 nlohmann::json CONFIG;
+
+{% for fn_decl in fn_decls %}
+{{ fn_decl }}
+{% endfor %}
+
+{% for fn_defn in fn_defns %}
+{{ fn_defn }}
+{% endfor %}
 
 int main(int argc, char* argv[]) {
     argparse::ArgumentParser program(argv[0]);
@@ -72,13 +102,7 @@ int main(int argc, char* argv[]) {
         CONFIG = nlohmann::json::parse(config_stream);
     }
 
-    {% for var, type, init in lvars %}
-    {{ type }} {{ var }} = {{ init }} ;
-    {% endfor %}
-
-    {% for stmt in stmts %}
-    {{ stmt | indent }}
-    {% endfor %}
+    _main() ;
 
     return 0;
 }

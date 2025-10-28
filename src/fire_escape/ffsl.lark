@@ -44,12 +44,17 @@ json_expr: ref ( "[" _NEWLINE? expression _NEWLINE? "]" )+ ":" type
 assignment_stmt: ref ( ":" type )? "=" expression _STMT_END
 !update_stmt: ref ( "+=" | "-=" | "*=" | "/=" ) expression _STMT_END
 print_stmt: "print" "(" [ expression ( "," expression )* ] ")" _STMT_END
+return_stmt: "return" expression? _STMT_END
 
 if_stmt: "if" expression ":" _NEWLINE? block elif_section* else_section? "end" _STMT_END
 elif_section: "elif" expression ":" _NEWLINE? block
 else_section: "else" ":" _NEWLINE? block
 
-?statement: pass_stmt | assignment_stmt | update_stmt | print_stmt | if_stmt
+?statement: pass_stmt | assignment_stmt | update_stmt | print_stmt | return_stmt | if_stmt
 block: statement+
 
-source: block
+func: "def" CNAME "(" _params ")" [ "->" type ] ":" _STMT_END block "end" _STMT_END
+_params: [ param ( "," param )* ]
+param: CNAME ":" type
+
+source: func+

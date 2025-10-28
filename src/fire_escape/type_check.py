@@ -209,6 +209,11 @@ def check_type(node: AstNode, env: TypeEnv):
                     case BuiltinFunc() as fn:
                         rtype = env.check_func_call(fn.ptypes, fn.rtype, atypes)
                         call.type = rtype
+                    case Func() as fn:
+                        rtype = "void" if fn.rtype is None else fn.rtype.name
+                        ptypes = [param.type.name for param in fn.params]
+                        rtype = env.check_func_call(ptypes, rtype, atypes)
+                        call.type = rtype
                     case _ as unexpected:
                         raise TypeError(f"{unexpected} is not callable")
             case JsonExpr() as expr:
@@ -241,6 +246,18 @@ def check_type(node: AstNode, env: TypeEnv):
                         env.check_update(stmt.op, ltype, rtype)
                     case _:
                         raise TypeError(f"Object {obj} can't be updated")
+            case ReturnStmt() as stmt:
+                assert stmt.func is not None
+                if (stmt.arg is None) != (stmt.func.rtype is None):
+                    raise TypeError(f"Return type mismatch")
+
+                if stmt.arg is not None and stmt.func.rtype is not None:
+                    atype = get_type(stmt.arg)
+                    if not env.is_convertable_to(atype, stmt.func.rtype.name):
+                        raise TypeError(
+                            f"Return type mismatch: returning {atype} from function of type {stmt.func.rtype.name}"
+                        )
+
             case IfStmt() as stmt:
                 cond_type = get_type(stmt.condition)
                 if not env.is_convertable_to(cond_type, "float"):
@@ -249,7 +266,15 @@ def check_type(node: AstNode, env: TypeEnv):
                 cond_type = get_type(stmt.condition)
                 if not env.is_convertable_to(cond_type, "float"):
                     raise TypeError("Condition expression type not boolean or numeric")
+            case Source() as source:
+                num_main = sum(fn.name == "main" for fn in source.funcs)
+                if num_main != 1:
+                    raise TypeError("One and only one main function must be defined")
 
     except CodeError as e:
         e.pos = node.pos if e.pos is None else e.pos
         raise e
+    except CompilerError:
+        raise
+    except Exception as e:
+        raise CompilerError(f"{node=}") from e
