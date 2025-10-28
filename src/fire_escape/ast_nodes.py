@@ -172,6 +172,7 @@ class Func(AstNode):
     rtype: TypeRef | None
     block: Block
     lvars: list[LocalVariable] = Field(default_factory=list)
+    return_stmts: list[ReturnStmt] = Field(default_factory=list)
     scope: ChainMap[str, Any] | None = Field(default=None, repr=False)
 
 

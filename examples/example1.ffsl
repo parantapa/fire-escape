@@ -1,6 +1,10 @@
 # hello
 
-def main() -> int:
+def hello() -> str:
+    return ""
+end
+
+def main():
     x: int = 6
 
     y: const float = 20
@@ -25,8 +29,5 @@ def main() -> int:
 
     print("Hello, World", z)
     print()
-
-    return 10
-    # return
 end
 

@@ -336,6 +336,7 @@ def link_return_statements(node: AstNode, func: Func | None):
                 assert func is not None
                 assert stmt.func is None
                 stmt.func = func
+                func.return_stmts.append(stmt)
 
         for child in node.children:
             link_return_statements(child, func)

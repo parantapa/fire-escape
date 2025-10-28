@@ -151,38 +151,49 @@ class TypeEnv:
             )
 
 
-def get_type(node: AstNode) -> str:
+def get_type(node: AstNode | BuiltinFunc | BuiltinConst) -> str:
     match node:
         case Bool():
             return "bool"
+
         case Int():
             return "int"
+
         case Float():
             return "float"
+
         case Str():
             return "str"
+
         case Ref() as ref:
-            obj = ref.value()
-            match obj:
-                case LocalVariable() as var:
-                    return var.type.name
-                case BuiltinFunc() as fn:
-                    return fn.type
-                case BuiltinConst() as const:
-                    return const.type
-                case _:
-                    raise RuntimeError(f"Unknown type {obj=}")
-        case UnaryExpr() as expr:
+            return get_type(ref.value())
+
+        case UnaryExpr() | BinaryExpr() | FuncCall() as expr:
             assert expr.type is not None
             return expr.type
-        case BinaryExpr() as expr:
-            assert expr.type is not None
-            return expr.type
-        case FuncCall() as call:
-            assert call.type is not None
-            return call.type
+
+        case TypeRef() as tref:
+            return tref.name
+
         case JsonExpr() as expr:
-            return expr.type.name
+            return get_type(expr.type)
+
+        case LocalVariable() | Parameter() as var:
+            return get_type(var.type)
+
+        case BuiltinFunc() as func:
+            ptypes = ", ".join(func.ptypes)
+            return f"({ptypes}) -> {func.rtype}"
+
+        case BuiltinConst() as const:
+            return const.type
+
+        case Func() as func:
+            ptypes = [get_type(param) for param in func.params]
+            ptypes = ", ".join(ptypes)
+            rtype = "void" if func.rtype is None else get_type(func.rtype)
+            return f"({ptypes}) -> {rtype}"
+
         case _ as unexpected:
             raise CompilerError(f"Unexpected expression type: {unexpected=}")
 
@@ -196,13 +207,16 @@ def check_type(node: AstNode, env: TypeEnv):
             case TypeRef() as tref:
                 if tref.name not in env.graph:
                     raise TypeError(f"Unknown type: {tref.name}")
+
             case UnaryExpr() as expr:
                 arg_type = get_type(expr.arg)
                 expr.type = env.check_unary(expr.op, arg_type)
+
             case BinaryExpr() as expr:
                 type1 = get_type(expr.left)
                 type2 = get_type(expr.right)
                 expr.type = env.check_binary(expr.op, type1, type2)
+
             case FuncCall() as call:
                 atypes = [get_type(arg) for arg in call.args]
                 match call.func.value():
@@ -216,6 +230,7 @@ def check_type(node: AstNode, env: TypeEnv):
                         call.type = rtype
                     case _ as unexpected:
                         raise TypeError(f"{unexpected} is not callable")
+
             case JsonExpr() as expr:
                 jvar_type = get_type(expr.jvar)
                 if jvar_type != "json":
@@ -224,6 +239,7 @@ def check_type(node: AstNode, env: TypeEnv):
                     )
                 idx_types = [get_type(idx) for idx in expr.idxs]
                 env.check_json_expr(idx_types, expr.type.name)
+
             case AssignmentStmt() as stmt:
                 obj = stmt.lvalue.value()
                 match obj:
@@ -235,6 +251,7 @@ def check_type(node: AstNode, env: TypeEnv):
                         env.check_assign(ltype, rtype)
                     case _:
                         raise TypeError(f"Object {obj} can't be assigned to")
+
             case UpdateStmt() as stmt:
                 obj = stmt.lvalue.value()
                 match obj:
@@ -246,6 +263,7 @@ def check_type(node: AstNode, env: TypeEnv):
                         env.check_update(stmt.op, ltype, rtype)
                     case _:
                         raise TypeError(f"Object {obj} can't be updated")
+
             case ReturnStmt() as stmt:
                 assert stmt.func is not None
                 if (stmt.arg is None) != (stmt.func.rtype is None):
@@ -262,14 +280,24 @@ def check_type(node: AstNode, env: TypeEnv):
                 cond_type = get_type(stmt.condition)
                 if not env.is_convertable_to(cond_type, "float"):
                     raise TypeError("Testexpression type not boolean or numeric")
+
             case ElifSection() as stmt:
                 cond_type = get_type(stmt.condition)
                 if not env.is_convertable_to(cond_type, "float"):
                     raise TypeError("Condition expression type not boolean or numeric")
+
+            case Func() as func:
+                if func.rtype is not None and not func.return_stmts:
+                    raise TypeError("Function with defined return types must return")
+
             case Source() as source:
-                num_main = sum(fn.name == "main" for fn in source.funcs)
-                if num_main != 1:
+                mains = [fn for fn in source.funcs if fn.name == "main"]
+                if len(mains) != 1:
                     raise TypeError("One and only one main function must be defined")
+
+                main = mains[0]
+                if get_type(main) != "() -> void":
+                    raise TypeError("main function must be of type '() -> void'")
 
     except CodeError as e:
         e.pos = node.pos if e.pos is None else e.pos
