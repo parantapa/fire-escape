@@ -227,7 +227,7 @@ def check_type(node: AstNode, env: TypeEnv):
             case AssignmentStmt() as stmt:
                 obj = stmt.lvalue.value()
                 match obj:
-                    case LocalVariable() as var:
+                    case LocalVariable() | Parameter() as var:
                         if var.type.is_const and stmt.var is None:
                             raise TypeError("Can't assign to constants")
                         ltype = get_type(stmt.lvalue)
@@ -238,7 +238,7 @@ def check_type(node: AstNode, env: TypeEnv):
             case UpdateStmt() as stmt:
                 obj = stmt.lvalue.value()
                 match obj:
-                    case LocalVariable() as var:
+                    case LocalVariable() | Parameter() as var:
                         if var.type.is_const:
                             raise TypeError("Can't assign to constants")
                         ltype = get_type(stmt.lvalue)
