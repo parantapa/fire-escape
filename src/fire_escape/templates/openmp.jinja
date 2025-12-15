@@ -1,0 +1,575 @@
+{#- name: "simulator.cpp" -#}
+#include <cmath>
+#include <cstdint>
+#include <array>
+#include <filesystem>
+
+#include <omp.h>
+#include <fmt/base.h>
+#include <fmt/ranges.h>
+#include <argparse/argparse.hpp>
+
+#include <hpc_utils/panic.hpp>
+#include <hpc_utils/static_array.hpp>
+#include <hpc_utils/rng_utils.hpp>
+#include <hpc_utils/hdf5_utils.hpp>
+#include <hpc_utils/arrow_utils.hpp>
+
+using namespace hpc_utils;
+
+struct alignas(L1_CACHE_SIZE) ThreadState {
+    RngEngine rng;
+};
+
+ThreadState* thread_state = nullptr;
+#pragma omp threadprivate (thread_state)
+
+struct ThreadStateManager {
+    ThreadStateManager() {
+        std::random_device rnd_device;
+        auto seed = rnd_device();
+
+        #pragma omp parallel
+        {
+            #pragma omp critical
+            {
+                thread_state = new ThreadState();
+                thread_state->rng = RngEngine({ { seed, unsigned(omp_get_thread_num()) } });
+            }
+        }
+    }
+
+    ~ThreadStateManager() {
+        #pragma omp parallel
+        {
+            #pragma omp critical
+            {
+                delete thread_state;
+                thread_state = nullptr;
+            }
+        }
+    }
+};
+
+using DiscreteDist2D = VoseAliasSampler2d<float, std::int32_t>;
+
+using fire_state_t = std::int8_t;
+constexpr fire_state_t _unburned = 0;
+constexpr fire_state_t _burning = 1;
+constexpr fire_state_t _burned_out = 2;
+
+struct Position {
+    std::int32_t x;
+    std::int32_t y;
+};
+
+static inline float distance(Position a, Position b) { return std::hypotf(a.x - b.x, a.y - b.y); }
+
+static inline float alignment(Position a, Position b, float direction) {
+    float dx = b.x - a.x;
+    float dy = b.y - a.y;
+
+    float d_abs = std::hypotf(dx, dy);
+
+    float wx = std::cosf(direction / 360.0);
+    float wy = -std::sinf(direction / 360.0);
+
+    return (dx * wx + dy * wy) / d_abs;
+}
+
+static inline float clamp(float x, float xmin, float xmax) {
+    if (x < xmin) {
+        x = xmin;
+    }
+    if (x > xmax) {
+        x = xmax;
+    }
+    return x;
+}
+
+static inline bool is_valid_position(std::int32_t x, std::int32_t y) {
+    return x >= 0 && x < NUM_ROWS && y >= 0 && y <= NUM_COLS;
+}
+
+constexpr std::int32_t MAX_JUMP_X = 8;
+constexpr std::int32_t MAX_JUMP_Y = 8;
+constexpr std::int32_t MAX_EMBER_COUNT = 1024;
+
+std::int32_t NUM_TICKS = 0;
+std::int32_t NUM_ROWS = 0;
+std::int32_t NUM_COLS = 0;
+std::int32_t CUR_TICK = 0;
+
+{% for var in global_vars %}
+{{ var.type }} {{ var.name | mangle }} = {{ var.init }};
+{% endfor %}
+
+struct TileData {
+    {% for col in tile_data.columns %}
+    StaticArray2d<{{ col.type }}> {{ col.name | mangle }};
+    {% endfor %}
+    StaticArray2d<std::int32_t> change_time;
+    StaticArray2d<std::int32_t> num_ember_gen;
+    StaticArray2d<std::int32_t> num_ember_recv;
+    StaticArray2d<DiscreteDist2D> jump_dist;
+
+    explicit TileData(const std::string& file_name)
+        {% for col in tile_data.columns %}
+        {% if loop.first %}:{% else %},{% endif %} {{ col.name | mangle }}(NUM_ROWS, NUM_COLS)
+        {% endfor %}
+        , change_time(NUM_ROWS, NUM_COLS)
+        , num_ember_gen(NUM_ROWS, NUM_COLS)
+        , num_ember_recv(NUM_ROWS, NUM_COLS)
+        , jump_dist(NUM_ROWS, NUM_COLS)
+    {
+        H5::H5File file = H5::H5File(file_name, H5F_ACC_RDONLY);
+
+        #pragma omp parallel for simd collapse(2)
+        for (std::int32_t x = 0; x < NUM_ROWS; x++) {
+            for (std::int32_t y = 0; y < NUM_COLS; y++) {
+                {% for col in tile_data.columns %}
+                {{ col.name | mangle }}[x, y] = 0;
+                {% endfor %}
+                change_time[x, y] = 0;
+                num_ember_gen[x, y] = 0;
+                num_ember_recv[x, y] = 0;
+            }
+        }
+
+        #pragma omp parallel for collapse(2)
+        for (std::int32_t x = 0; x < NUM_ROWS; x++) {
+            for (std::int32_t y = 0; y < NUM_COLS; y++) {
+                jump_dist.construct(x, y, 2 * MAX_JUMP_X, 2 * MAX_JUMP_Y);
+            }
+        }
+
+        {% for col in tile_data.columns %}
+        {% if col.is_static %}
+        read_dataset<{{ col.type }}>(file, "{{ col.name }}", {{ col.name | mangle }});
+        {% endif %}
+        {% endfor %}
+
+        #pragma omp parallel for collapse(2)
+        for (std::int32_t x = 0; x < NUM_ROWS; x++) {
+            for (std::int32_t y = 0; y < NUM_COLS; y++) {
+                change_time[x, y] = -1;
+                jump_dist[x, y].reset();
+            }
+        }
+    }
+
+    TileData() = delete;                           // default constructor
+    TileData(const TileData&) = delete;            // copy constructor
+    TileData(TileData&&) = delete;                 // move constructor
+    TileData& operator=(const TileData&) = delete; // copy assignment
+    TileData& operator=(TileData&&) = delete;      // move assignment
+
+    void seed(const std::string& file_name) {
+        H5::H5File file = H5::H5File(file_name, H5F_ACC_RDONLY);
+
+        {% for col in tile_data.columns %}
+        {% if col.is_seeded %}
+        read_dataset<fire_state_t>(file, "state", _state);
+        {% endif %}
+        {% endfor %}
+    }
+
+    ~TileData() {
+        #pragma omp parallel for collapse(2)
+        for (std::int32_t x = 0; x < NUM_ROWS; x++) {
+            for (std::int32_t y = 0; y < NUM_COLS; y++) {
+                jump_dist.destruct(x, y);
+            }
+        }
+    }
+};
+
+struct TickData {
+    {% for var in tick_vars %}
+    std::vector<{{ var.type }}> {{ var.name | mangle }};
+    {% endfor %}
+
+    explicit TickData(const std::string& file_name)
+        {% for var in tick_vars %}
+        {% if loop.first %}:{% else %},{% endif %} {{ var.name | mangle }}(NUM_TICKS)
+        {% endfor %}
+    {
+        for (std::int64_t i = 0; i < NUM_TICKS; i++) {
+            {% for var in tick_vars %}
+            {{ var.name | mangle }}[i] = 0;
+            {% endfor %}
+        }
+
+        auto file = arrow_open_file(file_name);
+        auto reader = make_parquet_reader(file);
+        auto schema = get_parquet_schema(reader);
+
+        auto tick_col = parquet_read_col<{{ tick_vars_key.type }}>(reader, schema, "{{ tick_vars_key.name }}");
+        {% for var in tick_vars %}
+        auto {{ var.name | mangle }}_col = parquet_read_col<{{ var.type }}>(reader, schema, "{{ var.name }}");
+        {% endfor %}
+
+        for (std::size_t i = 0; i < tick_col.size(); i++) {
+            auto tick = tick_col[i];
+            if (tick >= 0 && tick < NUM_TICKS) {
+                {% for var in tick_vars %}
+                {{ var.name | mangle }}[tick] = {{ var.name | mangle }}_col[tick];
+                {% endfor %}
+            }
+        }
+    }
+};
+
+{% for func in user_functions %}
+{{ func.decl }}
+{% endfor %}
+
+{% for func in user_functions %}
+{{ func.defn }}
+
+{% endfor %}
+
+void main_loop(TileData& tile_data, TickData& tick_data, H5::H5File& output_file) {
+    std::array<hsize_t, 3> full_dims = {hsize_t(NUM_TICKS), hsize_t(NUM_ROWS), hsize_t(NUM_COLS)};
+    auto file_space = H5::DataSpace(full_dims.size(), full_dims.data());
+
+    {% for col in tile_data.columns %}
+    {% if col.is_saved %}
+    auto {{ col.name | mangle }}_datatype = h5_type<{{ col.type }}>();
+    auto {{ col.name | mangle }}_dataset = output_file.createDataSet("{{ col.name }}", {{ col.name | mangle }}, file_space);
+    {% endif %}
+    {% endfor %}
+
+    for (CUR_TICK = 0; CUR_TICK < NUM_TICKS; CUR_TICK++) {
+        fmt::println("tick = {}", CUR_TICK);
+
+        {% for var in tick_vars %}
+        {{ var.name | mangle }} = tick_data.{{ var.name | mangle }}[CUR_TICK];
+        fmt::println("{{ var.name }} = {}", {{ var.name | mangle }});
+        {% endfor %}
+
+        #pragma omp parallel
+        {
+            // Transmission section
+            ///////////////////////////////////////////////////////////////////
+
+            // Reset ember acconting data
+            #pragma omp for simd collapse(2)
+            for (std::int32_t x = 0; x < NUM_ROWS; x++) {
+                for (std::int32_t y = 0; y < NUM_ROWS; y++) {
+                    tile_data.num_ember_gen[x, y] = 0;
+                    tile_data.num_ember_recv[x, y] = 0;
+                }
+            }
+
+            #pragma omp for collapse(2)
+            for (std::int32_t x = 0; x < NUM_ROWS; x++) {
+                for (std::int32_t y = 0; y < NUM_COLS; y++) {
+                    tile_data.jump_dist[x, y].reset();
+                }
+            }
+
+            // Create embers
+            #pragma omp for collapse(2)
+            for (std::int32_t x = 0; x < NUM_ROWS; x++) {
+                for (std::int32_t y = 0; y < NUM_COLS; y++) {
+                    if (tile_data._state[x, y] == _burning) {
+                        Position t_position{x, y};
+
+                        // clang-format off
+                        float rate = {{ ember_creation_rate_expression }};
+                        // clang-format on
+                        rate = std::max<float>(0.0, rate);
+
+                        if (rate > 0.0) {
+                            auto count = sample_poisson(thread_state->rng, rate);
+                            count = std::min(count, MAX_EMBER_COUNT);
+                            tile_data.num_ember_gen[x, y] = count;
+                        }
+                    }
+                }
+            }
+
+            // Compute jump dist
+            #pragma omp for collapse(2)
+            for (std::int32_t sx = 0; sx < NUM_ROWS; sx++) {
+                for (std::int32_t sy = 0; sy < NUM_COLS; sy++) {
+                    if (tile_data.num_ember_gen[sx, sy] > 0) {
+                        for (std::int32_t dxi = 0; dxi < 2 * MAX_JUMP_X; dxi++) {
+                            for (std::int32_t dyi = 0; dyi < 2 * MAX_JUMP_Y; dyi++) {
+                                std::int32_t dx = sx + dxi - MAX_JUMP_X;
+                                std::int32_t dy = sy + dyi - MAX_JUMP_Y;
+                                if (is_valid_position(dx, dy)) {
+                                    Position s_position{sx, sy};
+                                    Position d_position{dx, dy};
+
+                                    // clang-format off
+                                    float likelihood = {{ ember_jump_likelihood_expression }};
+                                    // clang-format on
+                                    likelihood = std::max<float>(0.0, likelihood);
+
+                                    tile_data.jump_dist[sx, sy].update(dxi, dyi, likelihood);
+                                }
+                            }
+                        }
+
+                        tile_data.jump_dist[sx, sy].prepare();
+                    }
+                }
+            }
+
+            // Assign embers to receivers
+            #pragma omp for collapse(2)
+            for (std::int32_t sx = 0; sx < NUM_ROWS; sx++) {
+                for (std::int32_t sy = 0; sy < NUM_COLS; sy++) {
+                    if (tile_data.num_ember_gen[sx, sy] > 0) {
+                        for (std::int32_t ei = 0; ei < tile_data.num_ember_gen[sx, sy]; ei++) {
+                            auto [dxi, dyi] = tile_data.jump_dist[sx, sy].sample(thread_state->rng);
+                            std::int32_t dx = sx + dxi - MAX_JUMP_X;
+                            std::int32_t dy = sy + dyi - MAX_JUMP_Y;
+                            if (is_valid_position(dx, dy)) {
+                                Position s_position{sx, sy};
+                                Position d_position{dx, dy};
+
+                                // clang-format off
+                                float death_prob = {{ ember_death_prob_expression }};
+                                // clang-format on
+                                death_prob = clamp(death_prob, 0.0, 1.0);
+
+                                if (sample_uniform(thread_state->rng) < 1.0 - death_prob) {
+                                    #pragma omp atomic update
+                                    tile_data.num_ember_recv[dx, dy] += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Do ignition
+            #pragma omp for collapse(2)
+            for (std::int32_t x = 0; x < NUM_ROWS; x++) {
+                for (std::int32_t y = 0; y < NUM_COLS; y++) {
+                    if (tile_data._state[x, y] == _unburned && tile_data.num_ember_recv[x, y] > 0) {
+                        Position t_position{x, y};
+
+                        // clang-format off
+                        float ignition_prob = {{ ignition_prob_expression }};
+                        // clang-format on
+                        ignition_prob = clamp(ignition_prob, 0.0, 1.0);
+                        ignition_prob = 1.0 - std::powf(1.0 - ignition_prob, tile_data.num_ember_recv[x, y]);
+
+                        if (sample_uniform(thread_state->rng) < ignition_prob) {
+                            float burn_time_mean = {{ burn_time_mean_expression }};
+                            float burn_time_std = {{ burn_time_std_expression }};
+                            float burn_time = sample_normal(thread_state->rng);
+                            burn_time = burn_time * burn_time_mean + burn_time_std;
+                            burn_time = std::max<float>(0, burn_time);
+                            burn_time = std::roundf(burn_time);
+
+                            tile_data._state[x, y] = _burning;
+                            tile_data.change_time[x, y] = CUR_TICK + burn_time;
+                        }
+                    }
+                }
+            }
+
+            // Transition section
+            ///////////////////////////////////////////////////////////////////
+
+            // Do transition
+            #pragma omp for collapse(2)
+            for (std::int32_t x = 0; x < NUM_ROWS; x++) {
+                for (std::int32_t y = 0; y < NUM_COLS; y++) {
+                    if (tile_data.change_time[x, y] == CUR_TICK) {
+                        tile_data._state[x, y] = _burned_out;
+                        tile_data.change_time[x, y] = -1;
+                    }
+                }
+            }
+
+        } // end parallel section
+
+        std::array<hsize_t, 3> slab_start = {hsize_t(CUR_TICK), 0, 0};
+        std::array<hsize_t, 3> slab_count = {1, hsize_t(NUM_ROWS), hsize_t(NUM_COLS)};
+        auto mem_space = H5::DataSpace(slab_count.size(), slab_count.data());
+        file_space.selectHyperslab(H5S_SELECT_SET, slab_count.data(), slab_start.data());
+
+        {% for col in tile_data.columns %}
+        {% if col.is_saved %}
+        {{ col.name | mangle }}_dataset.write(tile_data.{{ col.name | mangle }}.data(), {{ col.name | mangle }}, mem_space, file_space);
+        {% endif %}
+        {% endfor %}
+
+    } // end tick loop
+}
+
+int main(int argc, char* argv[]) {
+    argparse::ArgumentParser program(argv[0]);
+    program.add_description("Fire spread simulator.");
+
+    std::string tile_file_name = "";
+    std::string seed_file_name = "";
+    std::string tick_file_name = "";
+    std::string output_file_name = "";
+
+    // clang-format off
+    program.add_argument("-n", "--num-ticks")
+	.required()
+	.help("Num ticks")
+	.store_into(NUM_TICKS);
+
+    program.add_argument("-r", "--num-rows")
+	.required()
+	.help("Num rows in tile data")
+	.store_into(NUM_ROWS);
+
+    program.add_argument("-c", "--num-cols")
+	.required()
+	.help("Num cols in tile data")
+	.store_into(NUM_COLS);
+
+    program.add_argument("-t", "--tile-file")
+	.required()
+	.help("Tile data file (HDF5).")
+	.store_into(tile_file_name);
+
+    program.add_argument("-s", "--seed-file")
+	.required()
+	.help("Seed data file (HDF5).")
+	.store_into(seed_file_name);
+
+    program.add_argument("-w", "--tick-file")
+	.required()
+	.help("Tick data file (Parquet).")
+	.store_into(tick_file_name);
+
+    program.add_argument("-o", "--output-file")
+	.required()
+	.help("Output file (HDF5).")
+	.store_into(output_file_name);
+
+    {% for var in global_vars %}
+    {% if var.is_config %}
+    program.add_argument("--conifg-{{ var.name | underscore_to_dash }}")
+	.help("Config option {{ var.name }}.")
+	.default_value({{ var.default_value }})
+	.store_into({{ var.name | mangle }});
+
+    {% endif %}
+    {% endfor %}
+    // clang-format on
+
+    try {
+        program.parse_args(argc, argv);
+    } catch (const std::exception& err) {
+        std::cerr << err.what() << std::endl;
+        std::cerr << program;
+        std::exit(1);
+    }
+
+    fmt::println("NUM_TICKS = {}", NUM_TICKS);
+    fmt::println("NUM_ROWS = {}", NUM_ROWS);
+    fmt::println("NUM_COLS = {}", NUM_COLS);
+    fmt::println("seed_file_name = {}", seed_file_name);
+    fmt::println("tick_file_name = {}", tick_file_name);
+    fmt::println("tile_file_name = {}", tile_file_name);
+    fmt::println("output_file_name = {}", output_file_name);
+
+    {% for var in global_vars %}
+    {% if var.is_config %}
+    fmt::println("{{ var.name }} = {}", {{ var.name | mangle }});
+    {% endif %}
+    {% endfor %}
+
+    ThreadStateManager thread_state_manager;
+
+    TileData tile_data(tile_file_name);
+    TickData tick_data(tick_file_name);
+
+    tile_data.seed(seed_file_name);
+
+    if (std::filesystem::exists(output_file_name)) {
+        std::filesystem::remove(output_file_name);
+    }
+    H5::H5File output_file(output_file_name, H5F_ACC_CREAT | H5F_ACC_RDWR);
+
+    main_loop(tile_data, tick_data, output_file);
+
+    return 0;
+}
+
+{#- name: "CMakeLists.txt" -#}
+cmake_minimum_required(VERSION 4.0)
+
+project(
+  fire-spread-sim
+  VERSION 0.0.1
+  LANGUAGES CXX)
+
+find_package(OpenMP REQUIRED)
+find_package(fmt REQUIRED)
+find_package(argparse REQUIRED)
+find_package(phmap REQUIRED)
+find_package(random123 REQUIRED)
+find_package(Arrow REQUIRED)
+find_package(HDF5 REQUIRED)
+find_package(hpc-utils REQUIRED)
+
+add_library(_simulator_deps INTERFACE)
+target_sources(_simulator_deps
+INTERFACE
+    FILE_SET HEADERS
+    BASE_DIRS include
+)
+target_link_libraries(_simulator_deps
+INTERFACE
+    OpenMP::OpenMP_CXX
+    fmt::fmt
+    argparse::argparse
+    phmap
+    random123::random123
+    arrow::arrow
+    hdf5::hdf5
+    hdf5::hdf5_cpp
+    hpc-utils::hpc-utils
+)
+
+add_executable(simulator simulator.cpp)
+target_link_libraries(simulator PRIVATE _simulator_deps)
+target_compile_features(simulator PRIVATE cxx_std_23)
+
+{#- name: "conanfile.py" -#}
+from conan import ConanFile
+from conan.tools.cmake import cmake_layout, CMakeDeps, CMakeToolchain
+
+class FireSpreadSimRecipe(ConanFile):
+    settings = "os", "compiler", "build_type", "arch"
+
+    def requirements(self):
+        self.requires("fmt/12.1.0")
+        self.requires("argparse/3.2")
+        self.requires("parallel-hashmap/2.0.0")
+        self.requires("random123/1.14.0")
+        self.requires(
+            "arrow/22.0.0",
+            options=dict(
+                with_csv=True,
+                with_lz4=True,
+                with_snappy=True,
+                with_zstd=True,
+            ),
+        )
+        self.requires("hdf5/1.14.6")
+        self.requires("hpc-utils/0.1.0")
+
+    def generate(self):
+        toolchain = CMakeToolchain(self)
+        toolchain.user_presets_path = False
+        toolchain.generate()
+
+        cmake = CMakeDeps(self)
+        cmake.generate()
+
+    def layout(self):
+        cmake_layout(self)

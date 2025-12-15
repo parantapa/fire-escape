@@ -20,6 +20,8 @@ classifiers = [
 dependencies = [
     "click",
     "lark[interegular]",
+    "pydantic",
+    "networkx",
     "jinja2",
     "json5"
 ]

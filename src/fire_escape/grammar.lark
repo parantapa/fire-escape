@@ -1,0 +1,86 @@
+%import common.INT
+%import common.FLOAT
+%import common.ESCAPED_STRING
+%import common.CNAME
+%import common.WS_INLINE
+%import common.SH_COMMENT
+
+%declare _INDENT _DEDENT
+
+COMMENT.1: SH_COMMENT
+_NEWLINE: (/\r?\n[\t ]*/ | SH_COMMENT)+
+
+%ignore WS_INLINE
+%ignore COMMENT
+
+int: INT
+float: FLOAT
+str: ESCAPED_STRING
+ref:CNAME
+type: CNAME
+
+func_call: ref "(" [ expression ( "," expression )* ]  ")"
+
+?expression: binary_or
+?!binary_or: binary_and ( "or" binary_and )*
+?!binary_and: unary_not ( "and" unary_not )*
+?!unary_not: "not" unary_not | binary_cmp
+?!binary_cmp: binary_add ( ( "==" | "!=" | ">" | ">=" | "<" | "<=" ) binary_add )*
+?!binary_add: binary_mul ( ( "-" | "+" ) binary_mul )*
+?!binary_mul: unary_neg ( ( "/" | "*" | "%" ) unary_neg )*
+?!unary_neg: "-" unary_neg | binary_exp
+?!binary_exp: primary ( "**" primary )*
+?primary: "True"        -> true
+     | "False"          -> false
+     | int
+     | float
+     | str
+     | ref
+     | func_call
+     | "(" expression ")"
+
+!pass_stmt: "pass" _NEWLINE
+assignment_stmt: ref ( ":" type )? "=" expression _NEWLINE
+!update_stmt: ref ( "+=" | "-=" | "*=" | "/=" ) expression _NEWLINE
+print_stmt: "print" "(" [ expression ( "," expression )* ] ")" _NEWLINE
+return_stmt: "return" expression? _NEWLINE
+
+if_stmt: "if" expression ":" block elif_section* else_section?
+elif_section: "elif" expression ":" block
+else_section: "else" ":" block
+
+?statement: pass_stmt | assignment_stmt | update_stmt | print_stmt | return_stmt | if_stmt
+block: _NEWLINE _INDENT statement+ _DEDENT
+
+func: "def" CNAME "(" _params ")" [ "->" type ] ":" block
+_params: [ param ( "," param )* ]
+param: CNAME ":" type
+
+option: "option" CNAME "=" int _NEWLINE
+config: "config" CNAME ":" type "=" expression _NEWLINE
+
+tick_data: "tick-data" ":" _INDENT tick_var+ _DEDENT
+tick_var: CNAME ":" type tick_var_annot* _NEWLINE
+!tick_var_annot: "key"
+
+tile_data: "tile-data" ":" _INDENT tile_var+ _DEDENT
+tile_var: CNAME ":" type tile_var_annot* _NEWLINE
+!tile_var_annot: "seed" | "save"
+
+fire_model: "fire-model" ":" _INDENT model_expr+ _DEDENT
+?model_expr: create_embers
+    | ember_jump_likelihood
+    | ember_death_prob
+    | ignition_prob
+    | burn_time
+
+create_embers: "create-embers" "(" CNAME ")" ":" poisson_dist _NEWLINE
+ember_jump_likelihood: "ember-jump-likelihood" "(" CNAME "," CNAME ")" ":" expression _NEWLINE
+ember_death_prob: "ember-death-prob" "(" CNAME "," CNAME ")" ":" expression _NEWLINE
+ignition_prob: "ignition-prob" "(" CNAME ")" ":" expression _NEWLINE
+burn_time: "burn-time" "(" CNAME ")" ":" normal_dist _NEWLINE
+
+poisson_dist: "poisson" "[" expression "]"
+normal_dist: "normal" "[" expression "," expression "]"
+
+source: _NEWLINE* ( option | config | tick_data | tile_data | fire_model | func )+

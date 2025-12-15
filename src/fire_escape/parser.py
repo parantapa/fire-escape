@@ -1,4 +1,4 @@
-"""FFSL parser module."""
+"""Parser module."""
 
 from __future__ import annotations
 
@@ -8,29 +8,37 @@ from collections import ChainMap
 from typing import Any, cast
 
 from lark import Lark, Tree, Token
+from lark.indenter import Indenter
 
 from .ast_nodes import *
 from .error import *
-from .type_check import check_type, TypeEnv
-from .builtins import add_builtins
+# from .type_check import check_type, TypeEnv
+# from .builtins import add_builtins
 
 GRAMMAR_ANCHOR = __name__
-GRAMMAR_FILE = "ffsl.lark"
+GRAMMAR_FILE = "grammar.lark"
+
+
+class MyIndenter(Indenter):
+    NL_type = "_NEWLINE"  # type: ignore
+    OPEN_PAREN_types = ["LPAR", "LSQB"]  # type: ignore
+    CLOSE_PAREN_types = ["RPAR", "RSQB"]  # type: ignore
+    INDENT_type = "_INDENT"  # type: ignore
+    DEDENT_type = "_DEDENT"  # type: ignore
+    tab_len = 8  # type: ignore
 
 
 @cache
 def get_parser() -> Lark:
     with importlib.resources.path(GRAMMAR_ANCHOR, GRAMMAR_FILE) as path:
-        if path.exists():
-            return Lark(
-                path.read_text(),
-                parser="lalr",
-                start="source",
-                strict=True,
-                propagate_positions=True,
-            )
-
-    raise CompilerError("Unable to create parser.")
+        return Lark(
+            path.read_text(),
+            parser="lalr",
+            start="source",
+            strict=True,
+            propagate_positions=True,
+            postlex=MyIndenter(),
+        )
 
 
 def _unary(children, pos):
@@ -116,16 +124,8 @@ def build_ast(tree: Tree, file: str):
 
         case "type":
             match children:
-                case [op, name]:
-                    return TypeRef(
-                        is_const=True,
-                        name=name.value,
-                        pos=pos,
-                        children=[],
-                    )
                 case [name]:
                     return TypeRef(
-                        is_const=False,
                         name=name.value,
                         pos=pos,
                         children=[],
@@ -258,109 +258,214 @@ def build_ast(tree: Tree, file: str):
                 children=children,
             )
 
+        case "enum_constant":
+            (child,) = children
+            return EnumConstant(name=child.value, pos=pos, children=[])
+
+        case "enum":
+            name, *consts = children
+
+            for const in consts:
+                const.type = name.value
+
+            return Enum(name=name.value, consts=consts, pos=pos, children=consts)
+
+        case "global":
+            name, type, init = children
+            return GlobalVariable(
+                name=name.value,
+                type=type,
+                init=init,
+                pos=pos,
+                children=[type, init],
+            )
+
+        case "node_annot" | "edge_annot":
+            return " ".join(c.value for c in children)
+
+        case "node_col":
+            name, type, *annots = children
+            return NodeColumn(
+                name=name.value, type=type, annots=annots, pos=pos, children=[type]
+            )
+
+        case "edge_col":
+            name, type, *annots = children
+            return EdgeColumn(
+                name=name.value, type=type, annots=annots, pos=pos, children=[type]
+            )
+
+        case "node_table":
+            return NodeTable(cols=children, pos=pos, children=children)
+
+        case "edge_table":
+            return EdgeTable(cols=children, pos=pos, children=children)
+
         case "source":
-            return Source(funcs=children, pos=pos, children=children)
+            globals = []
+            enums = []
+            funcs = []
+            node_table = None
+            edge_table = None
+            for child in children:
+                match child:
+                    case GlobalVariable():
+                        globals.append(child)
+                    case Enum():
+                        enums.append(child)
+                    case Func():
+                        funcs.append(child)
+                    case NodeTable():
+                        if node_table is not None:
+                            raise ReferenceError("Node table has already been defined")
+                        node_table = child
+                    case EdgeTable():
+                        if edge_table is not None:
+                            raise ReferenceError("Edge table has already been defined")
+                        edge_table = child
+                    case _ as unexpected:
+                        raise CompilerError(f"{unexpected=}")
+
+            if node_table is None:
+                raise ReferenceError("Node table has not been defined")
+            if edge_table is None:
+                raise ReferenceError("Edge table has not been defined")
+
+            return Source(
+                globals=globals,
+                enums=enums,
+                funcs=funcs,
+                node_table=node_table,
+                edge_table=edge_table,
+                pos=pos,
+                children=children,
+            )
 
         case _ as unexpected:
             raise CompilerError(f"unexpected tree.data={unexpected}; {children=}")
 
 
-def build_scope(node: AstNode, scope: ChainMap[str, Any] | None):
-    try:
-        match node:
-            case Source() as source:
-                assert scope is None
-                scope = ChainMap()
-                source.scope = scope
-            case Func() as func:
-                assert scope is not None
+@node_error_attributer
+def build_scope(node: AstNode, scope: ChainMap[str, Any]):
+    match node:
+        case Source() as source:
+            assert scope is not None
+            source.scope = scope
+        case Func() as func:
+            assert scope is not None
 
-                if func.name in scope.maps[0]:
-                    raise ReferenceError(
-                        f"{func.name} has already been defined.",
-                        pos=func.pos,
-                    )
-                scope[func.name] = func
+            if func.name in scope.maps[0]:
+                raise ReferenceError(
+                    f"{func.name} has already been defined.",
+                    pos=func.pos,
+                )
+            scope[func.name] = func
 
-                scope = scope.new_child()
-                func.scope = scope
-            case Ref() as ref:
-                assert scope is not None
-                ref.scope = scope
-            case LocalVariable() | Parameter() as var:
-                assert scope is not None
-                if var.name in scope.maps[0]:
-                    raise ReferenceError(
-                        f"{var.name} has already been defined.",
-                        pos=var.pos,
-                    )
-                scope[var.name] = var
+            scope = scope.new_child()
+            func.scope = scope
+        case Ref() as ref:
+            assert scope is not None
+            ref.scope = scope
+        case LocalVariable() | Parameter() | EnumConstant() | GlobalVariable() as obj:
+            assert scope is not None
 
-        for child in node.children:
-            build_scope(child, scope)
-    except CodeError as e:
-        e.pos = node.pos if e.pos is None else e.pos
-        raise e
-    except CompilerError:
-        raise
-    except Exception as e:
-        raise CompilerError(f"{node=} {scope=}") from e
+            if obj.name in scope.maps[0]:
+                raise ReferenceError(
+                    f"{obj.name} has already been defined.",
+                    pos=obj.pos,
+                )
+            scope[obj.name] = obj
+        case NodeTable() | EdgeTable() as tab:
+            assert scope is not None
+            scope = ChainMap()
+            tab.scope = scope
+        case NodeColumn() | EdgeColumn() as col:
+            assert scope is not None
+            if col.name in scope.maps[0]:
+                raise ReferenceError(
+                    f"{col.name} has already been defined.",
+                    pos=col.pos,
+                )
+            scope[col.name] = col
+
+    for child in node.children:
+        build_scope(child, scope)
 
 
+@node_error_attributer
 def collect_local_varaibles(node: AstNode):
-    try:
-        match node:
-            case Func() as func:
-                assert func.scope is not None
-                for var in func.scope.maps[0].values():
-                    if isinstance(var, LocalVariable):
-                        func.lvars.append(var)
+    match node:
+        case Func() as func:
+            assert func.scope is not None
+            for var in func.scope.maps[0].values():
+                if isinstance(var, LocalVariable):
+                    func.lvars.append(var)
 
-        for child in node.children:
-            collect_local_varaibles(child)
-    except CodeError as e:
-        e.pos = node.pos if e.pos is None else e.pos
-        raise e
-    except CompilerError:
-        raise
-    except Exception as e:
-        raise CompilerError(f"{node=}") from e
+    for child in node.children:
+        collect_local_varaibles(child)
 
 
+@node_error_attributer
 def link_return_statements(node: AstNode, func: Func | None):
-    try:
-        match node:
-            case Func() as func:
-                func = func
-            case ReturnStmt() as stmt:
-                assert func is not None
-                assert stmt.func is None
-                stmt.func = func
-                func.return_stmts.append(stmt)
+    match node:
+        case Func() as func:
+            func = func
+        case ReturnStmt() as stmt:
+            assert func is not None
+            assert stmt.func is None
+            stmt.func = func
+            func.return_stmts.append(stmt)
 
-        for child in node.children:
-            link_return_statements(child, func)
-    except CodeError as e:
-        e.pos = node.pos if e.pos is None else e.pos
-        raise e
-    except CompilerError:
-        raise
-    except Exception as e:
-        raise CompilerError(f"{node=}") from e
+    for child in node.children:
+        link_return_statements(child, func)
+
+
+@node_error_attributer
+def device_function_check(node: AstNode, func: Func | None):
+    match node:
+        case Func() as func:
+            func = func
+        case PrintStmt():
+            assert func is not None
+            func.contains_print_stmt = True
+        case JsonExpr():
+            assert func is not None
+            func.contains_json_expr = True
+        case FuncCall() as call:
+            assert func is not None
+
+            match call.func.value():
+                case Func() as callee:
+                    func.calls.append(callee)
+
+    for child in node.children:
+        device_function_check(child, func)
+
+
+@node_error_attributer
+def add_enum_type(enum: Enum, env: TypeEnv):
+    env.add_user_defined_type(enum.name)
 
 
 def parse(file: str, text: str):
     parser = get_parser()
+
     tree = parser.parse(text)
     source: Source = cast(Source, build_ast(tree, file))
 
-    build_scope(source, None)
+    root_scope = ChainMap()
+    add_builtins(root_scope)
+    build_scope(source, root_scope)
+
     assert source.scope is not None
 
     collect_local_varaibles(source)
     link_return_statements(source, None)
-    add_builtins(source.scope)
+    device_function_check(source, None)
 
     env = TypeEnv.new()
+    for node in source.enums:
+        add_enum_type(node, env)
+
     check_type(source, env)
     return source

@@ -1,9 +1,18 @@
 """Standardized Exceptions."""
 
-__all__ = ["Position", "CompilerError", "CodeError", "ParseError", "ReferenceError", "TypeError"]
+__all__ = [
+    "Position",
+    "CompilerError",
+    "CodeError",
+    "ParseError",
+    "ReferenceError",
+    "TypeError",
+    "node_error_attributer",
+]
 
-from typing import ClassVar
+from typing import Protocol, Callable, Concatenate, ClassVar
 from dataclasses import dataclass
+from functools import wraps
 
 
 @dataclass
@@ -13,8 +22,12 @@ class Position:
     col: int
 
 
+class Node(Protocol):
+    pos: Position
+
+
 class CompilerError(RuntimeError):
-    """Error in the ffsc compiler."""
+    """Error in the compiler."""
 
 
 class CodeError(RuntimeError):
@@ -33,6 +46,25 @@ class CodeError(RuntimeError):
             return f"{self.pos.file}:{self.pos.line}:{self.pos.col}: {self.category}: {self.message}"
         else:
             return f"{self.category}: {self.message}"
+
+
+def node_error_attributer[N: Node, **P, R](
+    fn: Callable[Concatenate[N, P], R],
+) -> Callable[Concatenate[N, P], R]:
+    @wraps(fn)
+    def wrapper(node: N, *args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return fn(node, *args, **kwargs)
+        except CodeError as e:
+            if e.pos is None:
+                e.pos = node.pos
+            raise e
+        except CompilerError:
+            raise
+        except Exception as e:
+            raise CompilerError(f"{node=}") from e
+
+    return wrapper
 
 
 class ParseError(CodeError):
