@@ -25,7 +25,8 @@ class TypeEnv:
         nx.add_path(graph, ("u8", "u16", "u32", "u64", "uint"))
         nx.add_path(graph, ("f32", "f64", "float"))
 
-        graph.add_node("str")
+        graph.add_node("position")
+        graph.add_node("fire_state")
 
         env = cls(graph=graph)
         return env
@@ -39,6 +40,12 @@ class TypeEnv:
         else:
             return False
 
+    def is_numeric(self, child: str) -> bool:
+        return self.is_convertable_to(child, "float")
+
+    def is_integral(self, child: str) -> bool:
+        return self.is_convertable_to(child, "int")
+
     def lub_type(self, type1: str, type2: str) -> str | None:
         if type1 in self.graph and type2 in self.graph:
             ltype = nx.lowest_common_ancestor(
@@ -51,14 +58,14 @@ class TypeEnv:
     def check_unary(self, op: str, arg_type: str) -> str:
         match op:
             case "-":
-                if not self.is_convertable_to(arg_type, "float"):
+                if not self.is_numeric(arg_type):
                     raise TypeError(f"Unary `-` not supported for type {arg_type}")
-                if self.is_convertable_to(arg_type, "int"):
+                if self.is_integral(arg_type):
                     return "int"
                 else:
                     return "float"
             case "not":
-                if not self.is_convertable_to(arg_type, "float"):
+                if not self.is_numeric(arg_type):
                     raise TypeError(f"Unary `not` not supported for type {arg_type}")
                 return "bool"
             case _:
@@ -66,44 +73,44 @@ class TypeEnv:
 
     def check_binary(self, op: str, type1: str, type2: str) -> str:
         if op in ["or", "and"]:
-            if not self.is_convertable_to(type1, "float"):
+            if not self.is_numeric(type1):
                 raise TypeError(f"Binary {op} not supported for type {type1}")
-            if not self.is_convertable_to(type2, "float"):
+            if not self.is_numeric(type2):
                 raise TypeError(f"Binary {op} not supported for type {type2}")
             return "bool"
         elif op in ["==", "!="]:
             if type1 != type2:
-                if not self.is_convertable_to(type1, "float"):
+                if not self.is_numeric(type1):
                     raise TypeError(f"Binary {op} not supported for type {type1}")
-                if not self.is_convertable_to(type2, "float"):
+                if not self.is_numeric(type2):
                     raise TypeError(f"Binary {op} not supported for type {type2}")
             return "bool"
         elif op in [">", ">=", "<", "<="]:
-            if not self.is_convertable_to(type1, "float"):
+            if not self.is_numeric(type1):
                 raise TypeError(f"Binary {op} not supported for type {type1}")
-            if not self.is_convertable_to(type2, "float"):
+            if not self.is_numeric(type2):
                 raise TypeError(f"Binary {op} not supported for type {type2}")
             return "bool"
         elif op in ["+", "-", "*", "/"]:
-            if not self.is_convertable_to(type1, "float"):
+            if not self.is_numeric(type1):
                 raise TypeError(f"Binary {op} not supported for type {type1}")
-            if not self.is_convertable_to(type2, "float"):
+            if not self.is_numeric(type2):
                 raise TypeError(f"Binary {op} not supported for type {type2}")
             rtype = self.lub_type(type1, type2)
             assert rtype is not None
             return rtype
         elif op == "%":
-            if not self.is_convertable_to(type1, "int"):
+            if not self.is_integral(type1):
                 raise TypeError(f"Binary {op} not supported for type {type1}")
-            if not self.is_convertable_to(type2, "int"):
+            if not self.is_integral(type2):
                 raise TypeError(f"Binary {op} not supported for type {type2}")
             rtype = self.lub_type(type1, type2)
             assert rtype is not None
             return rtype
         elif op == "**":
-            if not self.is_convertable_to(type1, "float"):
+            if not self.is_numeric(type1):
                 raise TypeError(f"Binary {op} not supported for type {type1}")
-            if not self.is_convertable_to(type2, "float"):
+            if not self.is_numeric(type2):
                 raise TypeError(f"Binary {op} not supported for type {type2}")
             return "float"
         else:
@@ -117,17 +124,8 @@ class TypeEnv:
         for i, (ptype, atype) in enumerate(zip(ptypes, atypes), 1):
             if not self.is_convertable_to(atype, ptype):
                 raise TypeError(
-                    f"Parameter count mismatch: argument {i}: Can't convert argument of type {atype} to {ptype}"
+                    f"Parameter mismatch: argument {i}: Can't convert argument of type {atype} to {ptype}"
                 )
-        return rtype
-
-    def check_json_expr(self, idx_types: list[str], rtype: str) -> str:
-        for i, idx_type in enumerate(idx_types, 1):
-            if not (
-                self.is_convertable_to(idx_type, "int")
-                or self.is_convertable_to(idx_type, "str")
-            ):
-                raise TypeError(f"Index expressions {i} is not of type int or str")
         return rtype
 
     def check_assign(self, ltype: str, rtype: str):
@@ -138,9 +136,9 @@ class TypeEnv:
 
     def check_update(self, op: str, ltype: str, rtype: str):
         if op in ["+=", "-=", "*=", "/="]:
-            if not self.is_convertable_to(ltype, "float"):
+            if not self.is_numeric(ltype):
                 raise TypeError(f"Binary {op} not supported for type {ltype}")
-            if not self.is_convertable_to(rtype, "float"):
+            if not self.is_numeric(rtype):
                 raise TypeError(f"Binary {op} not supported for type {rtype}")
         else:
             raise CompilerError(f"Unexpected update operator: {op}")
@@ -151,7 +149,7 @@ class TypeEnv:
             )
 
 
-def get_type(node: AstNode | BuiltinFunc | BuiltinConst) -> str:
+def get_type(node: AstNode | BuiltinFunc | BuiltinObject) -> str:
     match node:
         case Bool():
             return "bool"
@@ -166,7 +164,7 @@ def get_type(node: AstNode | BuiltinFunc | BuiltinConst) -> str:
             return "str"
 
         case Ref() as ref:
-            return get_type(ref.value())
+            return get_type(ref.value)
 
         case UnaryExpr() | BinaryExpr() | FuncCall() as expr:
             assert expr.type is not None
@@ -175,24 +173,23 @@ def get_type(node: AstNode | BuiltinFunc | BuiltinConst) -> str:
         case TypeRef() as tref:
             return tref.name
 
-        case JsonExpr() as expr:
-            return get_type(expr.type)
-
         case LocalVariable() | Parameter() as var:
             return get_type(var.type)
 
         case BuiltinFunc() as func:
-            ptypes = ", ".join(func.ptypes)
-            return f"({ptypes}) -> {func.rtype}"
+            return func.type
 
-        case BuiltinConst() as const:
-            return const.type
+        case BuiltinObject() as obj:
+            return obj.type
 
         case Func() as func:
             ptypes = [get_type(param) for param in func.params]
             ptypes = ", ".join(ptypes)
             rtype = "void" if func.rtype is None else get_type(func.rtype)
             return f"({ptypes}) -> {rtype}"
+
+        case Config() | TileVar() | TickVar() as var:
+            return get_type(var.type)
 
         case _ as unexpected:
             raise CompilerError(f"Unexpected expression type: {unexpected=}")
@@ -219,7 +216,7 @@ def check_type(node: AstNode, env: TypeEnv):
 
             case FuncCall() as call:
                 atypes = [get_type(arg) for arg in call.args]
-                match call.func.value():
+                match call.func.value:
                     case BuiltinFunc() as fn:
                         rtype = env.check_func_call(fn.ptypes, fn.rtype, atypes)
                         call.type = rtype
@@ -231,21 +228,10 @@ def check_type(node: AstNode, env: TypeEnv):
                     case _ as unexpected:
                         raise TypeError(f"{unexpected} is not callable")
 
-            case JsonExpr() as expr:
-                jvar_type = get_type(expr.jvar)
-                if jvar_type != "json":
-                    raise TypeError(
-                        f"Objects of type {jvar_type} don't support indexing"
-                    )
-                idx_types = [get_type(idx) for idx in expr.idxs]
-                env.check_json_expr(idx_types, expr.type.name)
-
             case AssignmentStmt() as stmt:
-                obj = stmt.lvalue.value()
+                obj = stmt.lvalue.value
                 match obj:
-                    case LocalVariable() | Parameter() as var:
-                        if var.type.is_const and stmt.var is None:
-                            raise TypeError("Can't assign to constants")
+                    case LocalVariable() | Parameter():
                         ltype = get_type(stmt.lvalue)
                         rtype = get_type(stmt.rvalue)
                         env.check_assign(ltype, rtype)
@@ -253,11 +239,9 @@ def check_type(node: AstNode, env: TypeEnv):
                         raise TypeError(f"Object {obj} can't be assigned to")
 
             case UpdateStmt() as stmt:
-                obj = stmt.lvalue.value()
+                obj = stmt.lvalue.value
                 match obj:
-                    case LocalVariable() | Parameter() as var:
-                        if var.type.is_const:
-                            raise TypeError("Can't assign to constants")
+                    case LocalVariable() | Parameter():
                         ltype = get_type(stmt.lvalue)
                         rtype = get_type(stmt.rvalue)
                         env.check_update(stmt.op, ltype, rtype)
@@ -278,26 +262,17 @@ def check_type(node: AstNode, env: TypeEnv):
 
             case IfStmt() as stmt:
                 cond_type = get_type(stmt.condition)
-                if not env.is_convertable_to(cond_type, "float"):
+                if not env.is_numeric(cond_type):
                     raise TypeError("Testexpression type not boolean or numeric")
 
             case ElifSection() as stmt:
                 cond_type = get_type(stmt.condition)
-                if not env.is_convertable_to(cond_type, "float"):
+                if not env.is_numeric(cond_type):
                     raise TypeError("Condition expression type not boolean or numeric")
 
             case Func() as func:
                 if func.rtype is not None and not func.return_stmts:
                     raise TypeError("Function with defined return types must return")
-
-            case Source() as source:
-                mains = [fn for fn in source.funcs if fn.name == "main"]
-                if len(mains) != 1:
-                    raise TypeError("One and only one main function must be defined")
-
-                main = mains[0]
-                if get_type(main) != "() -> void":
-                    raise TypeError("main function must be of type '() -> void'")
 
     except CodeError as e:
         e.pos = node.pos if e.pos is None else e.pos

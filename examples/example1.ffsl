@@ -1,33 +1,49 @@
-# hello
+# Sample forest fire simulation
+# Written in Forest Fire Simulation Language (FFSL)
 
-def hello() -> str:
-    return ""
-end
+option max_jump_x = 1
+option max_jump_y = 1
+option max_ember_count = 1024
 
-def main():
-    x: int = 6
+config base_ember_rate: float = 0.5
+config base_ignition_rate: float = 0.03
 
-    y: const float = 20
+tick-data:
+    wind_speed: float
+    wind_direction: float
 
-    z: float = 10 > 20
+    tick: int key
 
-    # y = "Hello" + World == 10.0 + ( - "20" ) 
+tile-data:
+    burn_time: float
+    fuel: float
+    moisture: float
 
-    pass
+    pos: position
+    state: fire_state seed save
 
-    if x > 30:
-        x = 30
-    elif x > 20:
-        pass
-    elif x > 10:
-        pass
-    elif x > 5:
-        z = CONFIG["wind"][10]["direction"]:int
-    else:
-        z = sqrt(20)
-    end
+fire-model:
+    create-embers(t) : poisson[ember_creation_rate(t.fuel, t.moisture)]
+    ember-jump-likelihood(s, d) : ember_jump_likelihood(s.pos, d.pos)
+    ember-death-prob(s, d) : ember_death_prob(s.pos, d.pos)
+    ignition-prob(t) : ignition_prob(t.fuel, t.moisture)
+    burn-time(t) : normal[t.burn_time, 1.0]
 
-    print("Hello, World", z)
-    print()
-end
+def ember_creation_rate(fuel: float, moisture: float) -> float:
+    moisture_factor: float = exp(-2.0 * moisture)
+
+    return base_ember_rate * fuel * moisture_factor
+
+def ember_jump_likelihood(s: position, d: position) -> float:
+    dist_factor: float = exp(-1.0 * distance(s, d))
+    wind_factor: float = exp(alignment(s, d, wind_direction) * wind_speed)
+
+    return dist_factor * wind_factor
+
+def ember_death_prob(s: position, d: position) -> float:
+    return 1.0 - exp(-1.0 * distance(s, d))
+
+def ignition_prob(fuel: float, moisture: float) -> float:
+    moisture_factor: float = exp(-2.0 * moisture)
+    return base_ignition_rate * moisture_factor * fuel
 

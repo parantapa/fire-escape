@@ -6,7 +6,6 @@ from dataclasses import dataclass
 import importlib.resources
 
 import json5
-import jinja2
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,16 +83,3 @@ def load_template(name: str) -> tuple[str, str, None] | None:
         return tpl.source, tpl.filename, None
 
     return None
-
-
-_ENVIRONMENT = jinja2.Environment(
-    trim_blocks=True,
-    lstrip_blocks=True,
-    undefined=jinja2.StrictUndefined,
-    loader=jinja2.FunctionLoader(load_template),
-)
-
-
-def render(template: str, **kwargs) -> str:
-    tpl = _ENVIRONMENT.get_template(template)
-    return tpl.render(**kwargs)

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-__all__ = ["BuiltinFunc", "BuiltinConst"]
+__all__ = ["BuiltinFunc", "BuiltinObject"]
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections import ChainMap
 from functools import cached_property
 from typing import Any
@@ -23,12 +23,15 @@ class BuiltinFunc:
 
 
 @dataclass
-class BuiltinConst:
+class BuiltinObject:
     name: str
     type: str
+    value: Any | None = None
+    attrs: dict[str, Any] = field(default_factory=dict)
 
 
 def add_builtins(scope: ChainMap[str, Any]):
-    scope["sqrt"] = BuiltinFunc(name="sqrt", ptypes=["float"], rtype="float")
+    scope["exp"] = BuiltinFunc(name="exp", ptypes=["float"], rtype="float")
 
-    scope["CONFIG"] = BuiltinConst(name="CONFIG", type="json")
+    scope["alignment"] = BuiltinFunc(name="alignment", ptypes=["position", "position", "float"], rtype="float")
+    scope["distance"] = BuiltinFunc(name="distance", ptypes=["position", "position"], rtype="float")

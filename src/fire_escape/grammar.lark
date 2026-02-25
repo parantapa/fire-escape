@@ -13,10 +13,11 @@ _NEWLINE: (/\r?\n[\t ]*/ | SH_COMMENT)+
 %ignore WS_INLINE
 %ignore COMMENT
 
+!bool:  "True" | "False"
 int: INT
 float: FLOAT
 str: ESCAPED_STRING
-ref:CNAME
+ref: CNAME [ "." CNAME ]
 type: CNAME
 
 func_call: ref "(" [ expression ( "," expression )* ]  ")"
@@ -30,8 +31,7 @@ func_call: ref "(" [ expression ( "," expression )* ]  ")"
 ?!binary_mul: unary_neg ( ( "/" | "*" | "%" ) unary_neg )*
 ?!unary_neg: "-" unary_neg | binary_exp
 ?!binary_exp: primary ( "**" primary )*
-?primary: "True"        -> true
-     | "False"          -> false
+?primary: bool
      | int
      | float
      | str
@@ -42,14 +42,13 @@ func_call: ref "(" [ expression ( "," expression )* ]  ")"
 !pass_stmt: "pass" _NEWLINE
 assignment_stmt: ref ( ":" type )? "=" expression _NEWLINE
 !update_stmt: ref ( "+=" | "-=" | "*=" | "/=" ) expression _NEWLINE
-print_stmt: "print" "(" [ expression ( "," expression )* ] ")" _NEWLINE
 return_stmt: "return" expression? _NEWLINE
 
 if_stmt: "if" expression ":" block elif_section* else_section?
 elif_section: "elif" expression ":" block
 else_section: "else" ":" block
 
-?statement: pass_stmt | assignment_stmt | update_stmt | print_stmt | return_stmt | if_stmt
+?statement: pass_stmt | assignment_stmt | update_stmt | return_stmt | if_stmt
 block: _NEWLINE _INDENT statement+ _DEDENT
 
 func: "def" CNAME "(" _params ")" [ "->" type ] ":" block
@@ -59,15 +58,15 @@ param: CNAME ":" type
 option: "option" CNAME "=" int _NEWLINE
 config: "config" CNAME ":" type "=" expression _NEWLINE
 
-tick_data: "tick-data" ":" _INDENT tick_var+ _DEDENT
+tick_data: "tick-data" ":" _NEWLINE _INDENT tick_var+ _DEDENT
 tick_var: CNAME ":" type tick_var_annot* _NEWLINE
 !tick_var_annot: "key"
 
-tile_data: "tile-data" ":" _INDENT tile_var+ _DEDENT
+tile_data: "tile-data" ":" _NEWLINE _INDENT tile_var+ _DEDENT
 tile_var: CNAME ":" type tile_var_annot* _NEWLINE
 !tile_var_annot: "seed" | "save"
 
-fire_model: "fire-model" ":" _INDENT model_expr+ _DEDENT
+fire_model: "fire-model" ":" _NEWLINE _INDENT model_expr+ _DEDENT
 ?model_expr: create_embers
     | ember_jump_likelihood
     | ember_death_prob

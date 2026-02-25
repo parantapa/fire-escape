@@ -12,8 +12,9 @@ from lark.indenter import Indenter
 
 from .ast_nodes import *
 from .error import *
-# from .type_check import check_type, TypeEnv
-# from .builtins import add_builtins
+
+from .type_check import check_type, TypeEnv
+from .builtins import BuiltinObject, add_builtins
 
 GRAMMAR_ANCHOR = __name__
 GRAMMAR_FILE = "grammar.lark"
@@ -75,11 +76,10 @@ def build_ast(tree: Tree, file: str):
     pos = Position(file=file, line=tree.meta.line, col=tree.meta.column)
 
     match tree.data:
-        case "true":
+        case "bool":
+            (child,) = children
+            value = child.value == "True"
             return Bool(value=True, pos=pos, children=[])
-
-        case "false":
-            return Bool(value=False, pos=pos, children=[])
 
         case "int":
             (child,) = children
@@ -98,8 +98,9 @@ def build_ast(tree: Tree, file: str):
             return Str(value=value, pos=pos, children=[])
 
         case "ref":
-            (child,) = children
-            name = child.value
+            name = tuple(child.value for child in children)
+            if len(name) == 1:
+                name = name[0]
             return Ref(name=name, pos=pos, children=[])
 
         case "unary_neg" | "unary_not":
@@ -111,16 +112,6 @@ def build_ast(tree: Tree, file: str):
         case "func_call":
             func, *args = children
             return FuncCall(func=func, args=args, pos=pos, children=children)
-
-        case "json_expr":
-            jvar, *idxs, type = children
-            return JsonExpr(
-                jvar=jvar,
-                idxs=idxs,
-                type=type,
-                pos=pos,
-                children=children,
-            )
 
         case "type":
             match children:
@@ -138,12 +129,12 @@ def build_ast(tree: Tree, file: str):
 
         case "assignment_stmt":
             match children:
-                case [lvalue, type, rvalue]:
+                case [lvalue, typ, rvalue]:
                     var = LocalVariable(
                         name=lvalue.name,
-                        type=type,
+                        type=typ,
                         pos=pos,
-                        children=[type],
+                        children=[typ],
                     )
                     return AssignmentStmt(
                         lvalue=lvalue,
@@ -172,6 +163,12 @@ def build_ast(tree: Tree, file: str):
                 pos=pos,
                 children=[lvalue, rvalue],
             )
+
+        case "return_stmt":
+            if children:
+                return ReturnStmt(arg=children[0], pos=pos, children=children)
+            else:
+                return ReturnStmt(arg=None, pos=pos, children=[])
 
         case "block":
             return Block(stmts=children, pos=pos, children=children)
@@ -209,18 +206,9 @@ def build_ast(tree: Tree, file: str):
                 children=children,
             )
 
-        case "print_stmt":
-            return PrintStmt(args=children, pos=pos, children=children)
-
-        case "return_stmt":
-            if children:
-                return ReturnStmt(arg=children[0], pos=pos, children=children)
-            else:
-                return ReturnStmt(arg=None, pos=pos, children=[])
-
         case "param":
-            name, type = children
-            return Parameter(name=name.value, type=type, pos=pos, children=children)
+            name, typ = children
+            return Parameter(name=name.value, type=typ, pos=pos, children=[typ])
 
         case "func":
             name, *rest = children
@@ -258,85 +246,226 @@ def build_ast(tree: Tree, file: str):
                 children=children,
             )
 
-        case "enum_constant":
+        case "option":
+            name, value = children
+            name = name.value
+            value = int(value.value)
+            return Option(name=name, value=value, pos=pos, children=[])
+
+        case "config":
+            name, type, default = children
+            name = name.value
+            return Config(
+                name=name, type=type, default=default, pos=pos, children=[type, default]
+            )
+
+        case "tick_var_annot" | "tile_var_annot":
             (child,) = children
-            return EnumConstant(name=child.value, pos=pos, children=[])
+            return child.value
 
-        case "enum":
-            name, *consts = children
+        case "tick_var":
+            name, type, *annots = children
+            name = name.value
+            return TickVar(
+                name=name, type=type, annots=annots, pos=pos, children=[type]
+            )
 
-            for const in consts:
-                const.type = name.value
+        case "tick_data":
+            return TickData(tick_vars=children, pos=pos, children=children)
 
-            return Enum(name=name.value, consts=consts, pos=pos, children=consts)
+        case "tile_var":
+            name, type, *annots = children
+            name = name.value
+            return TileVar(
+                name=name, type=type, annots=annots, pos=pos, children=[type]
+            )
 
-        case "global":
-            name, type, init = children
-            return GlobalVariable(
-                name=name.value,
-                type=type,
-                init=init,
+        case "tile_data":
+            return TileData(tile_vars=children, pos=pos, children=children)
+
+        case "poisson_dist":
+            (child,) = children
+            return PoissonDist(mean=child, pos=pos, children=children)
+
+        case "normal_dist":
+            mean, std = children
+            return NormalDist(mean=mean, std=std, pos=pos, children=children)
+
+        case "create_embers":
+            var_name, dist = children
+            var_name = var_name.value
+            return CreateEmbers(var_name=var_name, dist=dist, pos=pos, children=[dist])
+
+        case "ember_jump_likelihood":
+            svar_name, dvar_name, like = children
+            svar_name = svar_name.value
+            dvar_name = dvar_name.value
+            return EmberJumpLikelihood(
+                svar_name=svar_name,
+                dvar_name=dvar_name,
+                like=like,
                 pos=pos,
-                children=[type, init],
+                children=[like],
             )
 
-        case "node_annot" | "edge_annot":
-            return " ".join(c.value for c in children)
-
-        case "node_col":
-            name, type, *annots = children
-            return NodeColumn(
-                name=name.value, type=type, annots=annots, pos=pos, children=[type]
+        case "ember_death_prob":
+            svar_name, dvar_name, prob = children
+            svar_name = svar_name.value
+            dvar_name = dvar_name.value
+            return EmberDeathProb(
+                svar_name=svar_name,
+                dvar_name=dvar_name,
+                prob=prob,
+                pos=pos,
+                children=[prob],
             )
 
-        case "edge_col":
-            name, type, *annots = children
-            return EdgeColumn(
-                name=name.value, type=type, annots=annots, pos=pos, children=[type]
-            )
+        case "ignition_prob":
+            var_name, prob = children
+            var_name = var_name.value
+            return IgnitionProb(var_name=var_name, prob=prob, pos=pos, children=[prob])
 
-        case "node_table":
-            return NodeTable(cols=children, pos=pos, children=children)
+        case "burn_time":
+            var_name, dist = children
+            var_name = var_name.value
+            return BurnTime(var_name=var_name, dist=dist, pos=pos, children=[dist])
 
-        case "edge_table":
-            return EdgeTable(cols=children, pos=pos, children=children)
+        case "fire_model":
+            create_embers = None
+            ember_jump_likelihood = None
+            ember_death_prob = None
+            ignition_prob = None
+            burn_time = None
 
-        case "source":
-            globals = []
-            enums = []
-            funcs = []
-            node_table = None
-            edge_table = None
             for child in children:
                 match child:
-                    case GlobalVariable():
-                        globals.append(child)
-                    case Enum():
-                        enums.append(child)
-                    case Func():
-                        funcs.append(child)
-                    case NodeTable():
-                        if node_table is not None:
-                            raise ReferenceError("Node table has already been defined")
-                        node_table = child
-                    case EdgeTable():
-                        if edge_table is not None:
-                            raise ReferenceError("Edge table has already been defined")
-                        edge_table = child
+                    case CreateEmbers():
+                        if create_embers is not None:
+                            raise ParseError(
+                                "create-embers has been defined multiple times",
+                                pos=child.pos,
+                            )
+                        create_embers = child
+                    case EmberJumpLikelihood():
+                        if ember_jump_likelihood is not None:
+                            raise ParseError(
+                                "ember-jump-likelihood has been defined multiple times",
+                                pos=child.pos,
+                            )
+                        ember_jump_likelihood = child
+                    case EmberDeathProb():
+                        if ember_death_prob is not None:
+                            raise ParseError(
+                                "ember-death-prob has been defined multiple times",
+                                pos=child.pos,
+                            )
+                        ember_death_prob = child
+                    case IgnitionProb():
+                        if ignition_prob is not None:
+                            raise ParseError(
+                                "ignition-prob has been defined multiple times",
+                                pos=child.pos,
+                            )
+                        ignition_prob = child
+                    case BurnTime():
+                        if burn_time is not None:
+                            raise ParseError(
+                                "burn-time has been defined multiple times",
+                                pos=child.pos,
+                            )
+                        burn_time = child
                     case _ as unexpected:
                         raise CompilerError(f"{unexpected=}")
 
-            if node_table is None:
-                raise ReferenceError("Node table has not been defined")
-            if edge_table is None:
-                raise ReferenceError("Edge table has not been defined")
+            if create_embers is None:
+                raise ParseError(
+                    "create-embers has not been defined",
+                    pos=pos,
+                )
+            if ember_jump_likelihood is None:
+                raise ParseError(
+                    "ember-jump-likelihood has not been defined",
+                    pos=pos,
+                )
+            if ember_death_prob is None:
+                raise ParseError(
+                    "ember-death-prob has not been defined",
+                    pos=pos,
+                )
+            if ignition_prob is None:
+                raise ParseError(
+                    "ignition-prob has not been defined",
+                    pos=pos,
+                )
+            if burn_time is None:
+                raise ParseError(
+                    "burn-time has not been defined",
+                    pos=pos,
+                )
+
+            return FireModel(
+                create_embers=create_embers,
+                ember_jump_likelihood=ember_jump_likelihood,
+                ember_death_prob=ember_death_prob,
+                ignition_prob=ignition_prob,
+                burn_time=burn_time,
+                pos=pos,
+                children=children,
+            )
+
+        case "source":
+            options = []
+            configs = []
+            funcs = []
+            tick_data = None
+            tile_data = None
+            fire_model = None
+            for child in children:
+                match child:
+                    case Option():
+                        options.append(child)
+                    case Config():
+                        configs.append(child)
+                    case Func():
+                        funcs.append(child)
+                    case TickData():
+                        if tick_data is not None:
+                            raise ParseError(
+                                "Tick data has been defined multiple times",
+                                pos=child.pos,
+                            )
+                        tick_data = child
+                    case TileData():
+                        if tile_data is not None:
+                            raise ParseError(
+                                "Tile data has been defined multiple times",
+                                pos=child.pos,
+                            )
+                        tile_data = child
+                    case FireModel():
+                        if fire_model is not None:
+                            raise ParseError(
+                                "Fire model has been defined multiple times",
+                                pos=child.pos,
+                            )
+                        fire_model = child
+                    case _ as unexpected:
+                        raise CompilerError(f"{unexpected=}")
+
+            if tick_data is None:
+                raise ParseError("Tick data has not been defined", pos=pos)
+            if tile_data is None:
+                raise ParseError("Tile data has not been defined", pos=pos)
+            if fire_model is None:
+                raise ParseError("Fire model has not been defined", pos=pos)
 
             return Source(
-                globals=globals,
-                enums=enums,
+                options=options,
+                configs=configs,
                 funcs=funcs,
-                node_table=node_table,
-                edge_table=edge_table,
+                tick_data=tick_data,
+                tile_data=tile_data,
+                fire_model=fire_model,
                 pos=pos,
                 children=children,
             )
@@ -349,11 +478,9 @@ def build_ast(tree: Tree, file: str):
 def build_scope(node: AstNode, scope: ChainMap[str, Any]):
     match node:
         case Source() as source:
-            assert scope is not None
             source.scope = scope
-        case Func() as func:
-            assert scope is not None
 
+        case Func() as func:
             if func.name in scope.maps[0]:
                 raise ReferenceError(
                     f"{func.name} has already been defined.",
@@ -363,30 +490,46 @@ def build_scope(node: AstNode, scope: ChainMap[str, Any]):
 
             scope = scope.new_child()
             func.scope = scope
-        case Ref() as ref:
-            assert scope is not None
-            ref.scope = scope
-        case LocalVariable() | Parameter() | EnumConstant() | GlobalVariable() as obj:
-            assert scope is not None
 
+        case Ref() as ref:
+            ref.scope = scope
+
+        case LocalVariable() | Parameter() as obj:
             if obj.name in scope.maps[0]:
                 raise ReferenceError(
                     f"{obj.name} has already been defined.",
                     pos=obj.pos,
                 )
             scope[obj.name] = obj
-        case NodeTable() | EdgeTable() as tab:
-            assert scope is not None
-            scope = ChainMap()
-            tab.scope = scope
-        case NodeColumn() | EdgeColumn() as col:
-            assert scope is not None
-            if col.name in scope.maps[0]:
+
+        case Config() as config:
+            if config.name in scope.maps[0]:
                 raise ReferenceError(
-                    f"{col.name} has already been defined.",
-                    pos=col.pos,
+                    f"{config.name} has already been defined.",
+                    pos=config.pos,
                 )
-            scope[col.name] = col
+            scope[config.name] = config
+
+        case TickVar() as var:
+            if var.name in scope.maps[0]:
+                raise ReferenceError(
+                    f"{var.name} has already been defined.",
+                    pos=var.pos,
+                )
+            scope[var.name] = var
+
+        case CreateEmbers() | IgnitionProb() | BurnTime() as obj:
+            scope = scope.new_child()
+
+            obj.scope = scope
+            obj.scope[obj.var_name] = BuiltinObject(obj.var_name, "tile")
+
+        case EmberJumpLikelihood() | EmberDeathProb() as obj:
+            scope = scope.new_child()
+
+            obj.scope = scope
+            obj.scope[obj.svar_name] = BuiltinObject(obj.svar_name, "src_tile")
+            obj.scope[obj.dvar_name] = BuiltinObject(obj.dvar_name, "dst_tile")
 
     for child in node.children:
         build_scope(child, scope)
@@ -397,6 +540,7 @@ def collect_local_varaibles(node: AstNode):
     match node:
         case Func() as func:
             assert func.scope is not None
+
             for var in func.scope.maps[0].values():
                 if isinstance(var, LocalVariable):
                     func.lvars.append(var)
@@ -421,30 +565,24 @@ def link_return_statements(node: AstNode, func: Func | None):
 
 
 @node_error_attributer
-def device_function_check(node: AstNode, func: Func | None):
+def populate_tile_objects(node: AstNode, tile_data: TileData):
     match node:
-        case Func() as func:
-            func = func
-        case PrintStmt():
-            assert func is not None
-            func.contains_print_stmt = True
-        case JsonExpr():
-            assert func is not None
-            func.contains_json_expr = True
-        case FuncCall() as call:
-            assert func is not None
+        case CreateEmbers() | IgnitionProb() | BurnTime() as obj:
+            assert obj.scope is not None
+            ref: BuiltinObject = obj.scope[obj.var_name]
 
-            match call.func.value():
-                case Func() as callee:
-                    func.calls.append(callee)
+            for tile_var in tile_data.tile_vars:
+                ref.attrs[tile_var.name] = tile_var
+
+        case EmberJumpLikelihood() | EmberDeathProb() as obj:
+            assert obj.scope is not None
+            for var_name in [obj.svar_name, obj.dvar_name]:
+                ref: BuiltinObject = obj.scope[var_name]
+                for tile_var in tile_data.tile_vars:
+                    ref.attrs[tile_var.name] = tile_var
 
     for child in node.children:
-        device_function_check(child, func)
-
-
-@node_error_attributer
-def add_enum_type(enum: Enum, env: TypeEnv):
-    env.add_user_defined_type(enum.name)
+        populate_tile_objects(child, tile_data)
 
 
 def parse(file: str, text: str):
@@ -461,11 +599,8 @@ def parse(file: str, text: str):
 
     collect_local_varaibles(source)
     link_return_statements(source, None)
-    device_function_check(source, None)
+    populate_tile_objects(source, source.tile_data)
 
     env = TypeEnv.new()
-    for node in source.enums:
-        add_enum_type(node, env)
-
     check_type(source, env)
     return source
