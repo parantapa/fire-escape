@@ -341,6 +341,25 @@ static void load_seed_data(const std::string& file_name) {
     {% endif %}
 
     {% endfor %}
+
+    #pragma omp parallel
+    {
+        #pragma omp for collapse(2) schedule(guided)
+        for (std::int32_t x = 0; x < NUM_ROWS; x++) {
+            for (std::int32_t y = 0; y < NUM_COLS; y++) {
+                if ({{ source.tile_data.state_var.name | mangle }}[x, y] == Burning) {
+                    float burn_time_mean = {{ source.fire_model.burn_time.dist.mean | codegen_expr }};
+                    float burn_time_std = {{ source.fire_model.burn_time.dist.std | codegen_expr }};
+                    float burn_time = sample_normal(thread_state->rng);
+                    burn_time = burn_time * burn_time_mean + burn_time_std;
+                    burn_time = std::max<float>(0, burn_time);
+                    burn_time = std::roundf(burn_time);
+
+                    change_time[x, y] = burn_time;
+                }
+            }
+        }
+    }
 }
 
 static arrow::Status load_tick_data(const std::string& file_name) {
@@ -498,10 +517,19 @@ static void main_loop(const std::string& file_name) {
 
 	reset_for_tick();
 
+        std::int32_t num_unburned = 0;
+        std::int32_t num_burning = 0;
+        std::int32_t num_burnt_out = 0;
+
+        std::int32_t num_ember_gen_sum = 0;
+        std::int32_t num_ember_recv_sum = 0;
+        double ignition_prob_sum = 0.0;
+        std::int32_t ignition_prob_count = 0;
+
         #pragma omp parallel
         {
             // Create embers
-            #pragma omp for collapse(2) schedule(guided)
+            #pragma omp for reduction(+: num_ember_gen_sum) collapse(2) schedule(guided)
             for (std::int32_t x = 0; x < NUM_ROWS; x++) {
                 for (std::int32_t y = 0; y < NUM_COLS; y++) {
                     if ({{ source.tile_data.state_var.name | mangle }}[x, y] == Burning) [[unlikely]] {
@@ -516,6 +544,7 @@ static void main_loop(const std::string& file_name) {
                             auto count = sample_poisson(thread_state->rng, rate);
                             count = std::min(count, MAX_EMBER_COUNT);
                             num_ember_gen[x, y] = count;
+                            num_ember_gen_sum += count;
                         }
                     }
                 }
@@ -550,7 +579,7 @@ static void main_loop(const std::string& file_name) {
             }
 
             // Assign embers to receivers
-            #pragma omp for collapse(2) schedule(guided)
+            #pragma omp for reduction(+: num_ember_recv_sum) collapse(2) schedule(guided)
             for (std::int32_t sx = 0; sx < NUM_ROWS; sx++) {
                 for (std::int32_t sy = 0; sy < NUM_COLS; sy++) {
                     if (num_ember_gen[sx, sy] > 0) [[unlikely]] {
@@ -570,6 +599,8 @@ static void main_loop(const std::string& file_name) {
                                 if (sample_uniform(thread_state->rng) < 1.0 - death_prob) {
                                     #pragma omp atomic update
                                     num_ember_recv[dx, dy] += 1;
+
+                                    num_ember_recv_sum += 1;
                                 }
                             }
                         }
@@ -578,7 +609,7 @@ static void main_loop(const std::string& file_name) {
             }
 
             // Do ignition
-            #pragma omp for collapse(2) schedule(guided)
+            #pragma omp for reduction(+: ignition_prob_sum, ignition_prob_count) collapse(2) schedule(guided)
             for (std::int32_t x = 0; x < NUM_ROWS; x++) {
                 for (std::int32_t y = 0; y < NUM_COLS; y++) {
                     if ({{ source.tile_data.state_var.name | mangle }}[x, y] == Unburned && num_ember_recv[x, y] > 0) [[unlikely]] {
@@ -589,6 +620,9 @@ static void main_loop(const std::string& file_name) {
                         // clang-format on
                         ignition_prob = clamp(ignition_prob, 0.0, 1.0);
                         ignition_prob = 1.0 - std::powf(1.0 - ignition_prob, num_ember_recv[x, y]);
+
+                        ignition_prob_sum += ignition_prob;
+                        ignition_prob_count += 1;
 
                         if (sample_uniform(thread_state->rng) < ignition_prob) {
                             float burn_time_mean = {{ source.fire_model.burn_time.dist.mean | codegen_expr }};
@@ -615,7 +649,28 @@ static void main_loop(const std::string& file_name) {
                     }
                 }
             }
+
+            #pragma omp for reduction(+:num_unburned, num_burning, num_burnt_out) collapse(2) schedule(guided)
+            for (std::int32_t x = 0; x < NUM_ROWS; x++) {
+                for (std::int32_t y = 0; y < NUM_COLS; y++) {
+                    if ({{ source.tile_data.state_var.name | mangle }}[x, y] == Unburned) {
+                        num_unburned++;
+                    } else if ({{ source.tile_data.state_var.name | mangle }}[x, y] == Burning) {
+                        num_burning++;
+                    } else {
+                        num_burnt_out++;
+                    }
+                }
+            }
+
         } // end parallel
+
+        fmt::println("num_unburned = {}", num_unburned);
+        fmt::println("num_burning = {}", num_burning);
+        fmt::println("num_burnt_out = {}", num_burnt_out);
+        fmt::println("num_ember_gen_sum = {}", num_ember_gen_sum);
+        fmt::println("num_ember_recv_sum = {}", num_ember_recv_sum);
+        fmt::println("ignition_prob_mean = {}", ignition_prob_sum / ignition_prob_count);
 
         std::array<hsize_t, 3> slab_start = {hsize_t(CUR_TICK), 0, 0};
         std::array<hsize_t, 3> slab_count = {1, hsize_t(NUM_ROWS), hsize_t(NUM_COLS)};
@@ -754,12 +809,6 @@ int main(int argc, char *argv[]) {
     fmt::println("total_alloc_gb = {}", total_alloc_bytes / 1e9);
 
     initialize_memory();
-    load_tile_data(tile_file_name);
-    load_seed_data(seed_file_name);
-    auto status = load_tick_data(tick_file_name);
-    if (!status.ok()) {
-        throw std::runtime_error(fmt::format("Failed to read tick data: {}", status.ToString()));
-    }
 
     std::random_device rnd_device;
     auto seed = rnd_device();
@@ -780,6 +829,13 @@ int main(int argc, char *argv[]) {
             }
         }
     });
+
+    load_tile_data(tile_file_name);
+    load_seed_data(seed_file_name);
+    auto status = load_tick_data(tick_file_name);
+    if (!status.ok()) {
+        throw std::runtime_error(fmt::format("Failed to read tick data: {}", status.ToString()));
+    }
 
     main_loop(output_file_name);
 
