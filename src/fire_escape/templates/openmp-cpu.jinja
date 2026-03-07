@@ -61,6 +61,7 @@ static inline {{ rtype }} {{ name }}( {{ ptypes | join(", ") }} ) ;
 #include <cmath>
 #include <cstdint>
 #include <random>
+#include <numbers>
 #include <experimental/mdspan>
 #include <experimental/scope>
 
@@ -117,23 +118,35 @@ static inline float clamp(float x, float xmin, float xmax) {
 }
 
 
-template <typename FloatType = float>
-FloatType sample_uniform(RngEngine& rng) {
-    std::uniform_real_distribution<FloatType> dist(0.0, 1.0);
+static inline std::int32_t sample_discrete(RngEngine& rng, std::int32_t a, std::int32_t b) {
+    std::uniform_int_distribution<std::int32_t> dist(a, b);
     return dist(rng);
 }
 
-template <typename FloatType = float>
-FloatType sample_normal(RngEngine& rng) {
-    std::normal_distribution<FloatType> dist(0.0, 1.0);
+static inline float sample_uniform(RngEngine& rng) {
+    std::uniform_real_distribution<float> dist(0.0, 1.0);
     return dist(rng);
 }
 
-template <typename IntType = std::int32_t>
-IntType sample_poisson(RngEngine& rng, auto rate) {
+static inline float sample_normal(RngEngine& rng) {
+    std::normal_distribution<float> dist(0.0, 1.0);
+    return dist(rng);
+}
+
+
+static inline float normal_log_prob(float x) {
+    return -(x * x + std::logf(std::numbers::pi) + std::logf(2.0)) / 2.0;
+}
+
+static inline std::int32_t sample_poisson(RngEngine& rng, float rate) {
     std::poisson_distribution<std::int32_t> dist(rate);
     return dist(rng);
 }
+
+static inline float poisson_log_prob(std::int32_t x, float rate) {
+    return x * std::logf(rate) - rate - std::lgammaf(x + 1);
+}
+
 
 {% for opt in source.options %}
 constexpr std::int32_t {{ opt.name | upper }} = {{ opt.value }};
@@ -146,6 +159,7 @@ static std::int32_t CUR_TICK = 0;
 
 struct alignas(std::hardware_constructive_interference_size) ThreadState {
     RngEngine rng;
+    double log_prob;
 };
 
 ThreadState* thread_state = nullptr;
@@ -351,11 +365,14 @@ static void load_seed_data(const std::string& file_name) {
                     float burn_time_mean = {{ source.fire_model.burn_time.dist.mean | codegen_expr }};
                     float burn_time_std = {{ source.fire_model.burn_time.dist.std | codegen_expr }};
                     float burn_time = sample_normal(thread_state->rng);
+                    thread_state->log_prob += normal_log_prob(burn_time);
+
                     burn_time = burn_time * burn_time_mean + burn_time_std;
                     burn_time = std::max<float>(0, burn_time);
                     burn_time = std::roundf(burn_time);
 
                     change_time[x, y] = burn_time;
+
                 }
             }
         }
@@ -441,12 +458,15 @@ static void prepare_alias_table(std::int32_t x, std::int32_t y) {
     if (lhsum < std::numeric_limits<double>::epsilon()) {
 	for (std::int32_t i = 0; i < n_elems; i++) {
 	    alias_prob[i] = 1.0;
+            likelihood[i] = std::logf(1.0 / n_elems);
 	}
 	return;
     }
 
     for (std::int32_t i = 0; i < n_elems; i++) {
-        alias_prob[i] = likelihood[i] / lhsum * n_elems;
+        likelihood[i] /= lhsum;
+        alias_prob[i] = likelihood[i] * n_elems;
+        likelihood[i] = std::logf(likelihood[i]);
         if (alias_prob[i] < 1.0) {
             small_q[small_q_head++] = i;
         } else {
@@ -484,7 +504,7 @@ static std::pair<std::int32_t, std::int32_t> sample_alias_table(std::int32_t x, 
     auto alias_index = stdex::mdspan(&jump_alias_index[x, y, 0, 0], n_elems);
     auto alias_prob = stdex::mdspan(&jump_alias_prob[x, y, 0, 0], n_elems);
 
-    std::int32_t i = sample_uniform(rng) * n_elems;
+    std::int32_t i = sample_discrete(rng, 0, n_elems - 1);
     float p = sample_uniform(rng);
 
     std::int32_t samp = 0;
@@ -497,6 +517,11 @@ static std::pair<std::int32_t, std::int32_t> sample_alias_table(std::int32_t x, 
     std::int32_t idx = samp / (2 * MAX_JUMP_Y + 1);
     std::int32_t idy = samp % (2 * MAX_JUMP_Y + 1);
     return std::make_pair(idx, idy);
+}
+
+// After prepare_table is called, jump_like contains the log probs
+static inline float alias_table_log_prob(std::int32_t idx, std::int32_t idy, std::int32_t x, std::int32_t y) {
+    return jump_like[x, y, idx, idy];
 }
 
 static void main_loop(const std::string& file_name) {
@@ -523,8 +548,6 @@ static void main_loop(const std::string& file_name) {
 
         std::int32_t num_ember_gen_sum = 0;
         std::int32_t num_ember_recv_sum = 0;
-        double ignition_prob_sum = 0.0;
-        std::int32_t ignition_prob_count = 0;
 
         #pragma omp parallel
         {
@@ -542,6 +565,8 @@ static void main_loop(const std::string& file_name) {
 
                         if (rate > 0.0) {
                             auto count = sample_poisson(thread_state->rng, rate);
+                            thread_state->log_prob += poisson_log_prob(count, rate);
+
                             count = std::min(count, MAX_EMBER_COUNT);
                             num_ember_gen[x, y] = count;
                             num_ember_gen_sum += count;
@@ -585,6 +610,8 @@ static void main_loop(const std::string& file_name) {
                     if (num_ember_gen[sx, sy] > 0) [[unlikely]] {
                         for (std::int32_t ei = 0; ei < num_ember_gen[sx, sy]; ei++) {
                             auto [dxi, dyi] = sample_alias_table(sx, sy, thread_state->rng);
+                            thread_state->log_prob += alias_table_log_prob(dxi, dyi, sx, sy);
+
                             std::int32_t dx = sx + dxi - MAX_JUMP_X;
                             std::int32_t dy = sy + dyi - MAX_JUMP_Y;
                             if (is_valid_position(dx, dy)) {
@@ -601,6 +628,9 @@ static void main_loop(const std::string& file_name) {
                                     num_ember_recv[dx, dy] += 1;
 
                                     num_ember_recv_sum += 1;
+                                    thread_state->log_prob += std::logf(1.0 - death_prob);
+                                } else {
+                                    thread_state->log_prob += std::logf(death_prob);
                                 }
                             }
                         }
@@ -609,7 +639,7 @@ static void main_loop(const std::string& file_name) {
             }
 
             // Do ignition
-            #pragma omp for reduction(+: ignition_prob_sum, ignition_prob_count) collapse(2) schedule(guided)
+            #pragma omp for collapse(2) schedule(guided)
             for (std::int32_t x = 0; x < NUM_ROWS; x++) {
                 for (std::int32_t y = 0; y < NUM_COLS; y++) {
                     if ({{ source.tile_data.state_var.name | mangle }}[x, y] == Unburned && num_ember_recv[x, y] > 0) [[unlikely]] {
@@ -621,19 +651,22 @@ static void main_loop(const std::string& file_name) {
                         ignition_prob = clamp(ignition_prob, 0.0, 1.0);
                         ignition_prob = 1.0 - std::powf(1.0 - ignition_prob, num_ember_recv[x, y]);
 
-                        ignition_prob_sum += ignition_prob;
-                        ignition_prob_count += 1;
-
                         if (sample_uniform(thread_state->rng) < ignition_prob) {
+                            thread_state->log_prob += std::logf(ignition_prob);
+
                             float burn_time_mean = {{ source.fire_model.burn_time.dist.mean | codegen_expr }};
                             float burn_time_std = {{ source.fire_model.burn_time.dist.std | codegen_expr }};
                             float burn_time = sample_normal(thread_state->rng);
+                            thread_state->log_prob += normal_log_prob(burn_time);
+
                             burn_time = burn_time * burn_time_mean + burn_time_std;
                             burn_time = std::max<float>(0, burn_time);
                             burn_time = std::roundf(burn_time);
 
                             {{ source.tile_data.state_var.name | mangle }}[x, y] = Burning;
                             change_time[x, y] = CUR_TICK + burn_time;
+                        } else {
+                            thread_state->log_prob += std::logf(1.0 - ignition_prob);
                         }
                     }
                 }
@@ -670,7 +703,6 @@ static void main_loop(const std::string& file_name) {
         fmt::println("num_burnt_out = {}", num_burnt_out);
         fmt::println("num_ember_gen_sum = {}", num_ember_gen_sum);
         fmt::println("num_ember_recv_sum = {}", num_ember_recv_sum);
-        fmt::println("ignition_prob_mean = {}", ignition_prob_sum / ignition_prob_count);
 
         std::array<hsize_t, 3> slab_start = {hsize_t(CUR_TICK), 0, 0};
         std::array<hsize_t, 3> slab_count = {1, hsize_t(NUM_ROWS), hsize_t(NUM_COLS)};
@@ -818,6 +850,7 @@ int main(int argc, char *argv[]) {
         {
             thread_state = new ThreadState();
             thread_state->rng = RngEngine({ {seed, unsigned(omp_get_thread_num())} });
+            thread_state->log_prob = 0.0;
         }
     }
     auto thread_state_free = stdex::scope_exit([=]() {
@@ -838,6 +871,13 @@ int main(int argc, char *argv[]) {
     }
 
     main_loop(output_file_name);
+
+    double log_prob = 0.0;
+    #pragma omp parallel reduction(+: log_prob)
+    {
+        log_prob += thread_state->log_prob;
+    }
+    fmt::println("log_prob = {}", log_prob);
 
     return 0;
 }
