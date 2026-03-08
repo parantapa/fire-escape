@@ -62,6 +62,7 @@ static inline {{ rtype }} {{ name }}( {{ ptypes | join(", ") }} ) ;
 #include <cstdint>
 #include <random>
 #include <numbers>
+#include <chrono>
 #include <experimental/mdspan>
 #include <experimental/scope>
 
@@ -77,6 +78,8 @@ static inline {{ rtype }} {{ name }}( {{ ptypes | join(", ") }} ) ;
 #include <parquet/arrow/reader.h>
 
 namespace stdex = std::experimental;
+using Clock = std::chrono::high_resolution_clock;
+using Duration = std::chrono::duration<double>;
 
 struct Position {
     std::int32_t x;
@@ -90,6 +93,10 @@ constexpr fire_state_t BurntOut = 2;
 
 using Rng = r123::Philox4x32;
 using RngEngine = r123::Engine<Rng>;
+
+using tick_extents_t = stdex::dextents<std::int32_t, 1>;
+using tile_extents_t = stdex::dextents<std::int32_t, 2>;
+using jump_extents_t = stdex::dextents<std::int32_t, 4>;
 
 static inline float distance(Position a, Position b) {
     return std::hypotf(a.x - b.x, a.y - b.y);
@@ -173,10 +180,6 @@ static inline bool is_valid_position(std::int32_t x, std::int32_t y) {
 static {{ cfg.type.name | cpp_type_config }} {{ cfg.name | mangle }} = {{ cfg.type.name | cpp_init }};
 {% endfor %}
 
-using tick_extents_t = stdex::dextents<std::int32_t, 1>;
-using tile_extents_t = stdex::dextents<std::int32_t, 2>;
-using jump_extents_t = stdex::dextents<std::int32_t, 4>;
-
 {% for var in source.tick_data.tick_vars %}
 {% if var.is_real %}
 static stdex::mdspan<{{ var.type.name | cpp_type }}, tick_extents_t> {{ var.name | mangle }};
@@ -198,6 +201,12 @@ static stdex::mdspan<std::int32_t, jump_extents_t> jump_alias_index;
 static stdex::mdspan<float, jump_extents_t> jump_alias_prob;
 static stdex::mdspan<std::int32_t, jump_extents_t> jump_alias_small_q;
 static stdex::mdspan<std::int32_t, jump_extents_t> jump_alias_large_q;
+
+static stdex::mdspan<std::int32_t, tick_extents_t> num_unburned;
+static stdex::mdspan<std::int32_t, tick_extents_t> num_burning;
+static stdex::mdspan<std::int32_t, tick_extents_t> num_burnt_out;
+static stdex::mdspan<std::int32_t, tick_extents_t> num_ember_gen_sum;
+static stdex::mdspan<std::int32_t, tick_extents_t> num_ember_recv_sum;
 
 {% for fn_decl in fn_decls %}
 {{ fn_decl }}
@@ -321,6 +330,16 @@ static void initialize_memory() {
 
         {{ init_jump_var("jump_alias_large_q") }}
     }
+
+    {{ init_tick_var("num_unburned") }}
+
+    {{ init_tick_var("num_burning") }}
+
+    {{ init_tick_var("num_burnt_out") }}
+
+    {{ init_tick_var("num_ember_gen_sum") }}
+
+    {{ init_tick_var("num_ember_recv_sum") }}
 }
 
 static void load_tile_data(const std::string& file_name) {
@@ -524,8 +543,7 @@ static inline float alias_table_log_prob(std::int32_t idx, std::int32_t idy, std
     return jump_like[x, y, idx, idy];
 }
 
-static void main_loop(const std::string& file_name) {
-    H5::H5File file(file_name, H5F_ACC_CREAT | H5F_ACC_RDWR);
+static void main_loop(H5::H5File& file) {
     std::array<hsize_t, 3> full_dims = {hsize_t(NUM_TICKS), hsize_t(NUM_ROWS), hsize_t(NUM_COLS)};
     auto file_space = H5::DataSpace(full_dims.size(), full_dims.data());
 
@@ -542,17 +560,16 @@ static void main_loop(const std::string& file_name) {
 
 	reset_for_tick();
 
-        std::int32_t num_unburned = 0;
-        std::int32_t num_burning = 0;
-        std::int32_t num_burnt_out = 0;
-
-        std::int32_t num_ember_gen_sum = 0;
-        std::int32_t num_ember_recv_sum = 0;
+        std::int32_t num_unburned_tick = 0;
+        std::int32_t num_burning_tick = 0;
+        std::int32_t num_burnt_out_tick = 0;
+        std::int32_t num_ember_gen_sum_tick = 0;
+        std::int32_t num_ember_recv_sum_tick = 0;
 
         #pragma omp parallel
         {
             // Create embers
-            #pragma omp for reduction(+: num_ember_gen_sum) collapse(2) schedule(guided)
+            #pragma omp for reduction(+: num_ember_gen_sum_tick) collapse(2) schedule(guided)
             for (std::int32_t x = 0; x < NUM_ROWS; x++) {
                 for (std::int32_t y = 0; y < NUM_COLS; y++) {
                     if ({{ source.tile_data.state_var.name | mangle }}[x, y] == Burning) [[unlikely]] {
@@ -569,7 +586,7 @@ static void main_loop(const std::string& file_name) {
 
                             count = std::min(count, MAX_EMBER_COUNT);
                             num_ember_gen[x, y] = count;
-                            num_ember_gen_sum += count;
+                            num_ember_gen_sum_tick += count;
                         }
                     }
                 }
@@ -604,7 +621,7 @@ static void main_loop(const std::string& file_name) {
             }
 
             // Assign embers to receivers
-            #pragma omp for reduction(+: num_ember_recv_sum) collapse(2) schedule(guided)
+            #pragma omp for reduction(+: num_ember_recv_sum_tick) collapse(2) schedule(guided)
             for (std::int32_t sx = 0; sx < NUM_ROWS; sx++) {
                 for (std::int32_t sy = 0; sy < NUM_COLS; sy++) {
                     if (num_ember_gen[sx, sy] > 0) [[unlikely]] {
@@ -627,7 +644,7 @@ static void main_loop(const std::string& file_name) {
                                     #pragma omp atomic update
                                     num_ember_recv[dx, dy] += 1;
 
-                                    num_ember_recv_sum += 1;
+                                    num_ember_recv_sum_tick += 1;
                                     thread_state->log_prob += std::logf(1.0 - death_prob);
                                 } else {
                                     thread_state->log_prob += std::logf(death_prob);
@@ -683,26 +700,26 @@ static void main_loop(const std::string& file_name) {
                 }
             }
 
-            #pragma omp for reduction(+:num_unburned, num_burning, num_burnt_out) collapse(2) schedule(guided)
+            #pragma omp for reduction(+:num_unburned_tick, num_burning_tick, num_burnt_out_tick) collapse(2) schedule(guided)
             for (std::int32_t x = 0; x < NUM_ROWS; x++) {
                 for (std::int32_t y = 0; y < NUM_COLS; y++) {
                     if ({{ source.tile_data.state_var.name | mangle }}[x, y] == Unburned) {
-                        num_unburned++;
+                        num_unburned_tick++;
                     } else if ({{ source.tile_data.state_var.name | mangle }}[x, y] == Burning) {
-                        num_burning++;
+                        num_burning_tick++;
                     } else {
-                        num_burnt_out++;
+                        num_burnt_out_tick++;
                     }
                 }
             }
 
         } // end parallel
 
-        fmt::println("num_unburned = {}", num_unburned);
-        fmt::println("num_burning = {}", num_burning);
-        fmt::println("num_burnt_out = {}", num_burnt_out);
-        fmt::println("num_ember_gen_sum = {}", num_ember_gen_sum);
-        fmt::println("num_ember_recv_sum = {}", num_ember_recv_sum);
+        num_unburned[CUR_TICK] = num_unburned_tick;
+        num_burning[CUR_TICK] = num_burning_tick;
+        num_burnt_out[CUR_TICK] = num_burning_tick;
+        num_ember_gen_sum[CUR_TICK] = num_ember_gen_sum_tick;
+        num_ember_recv_sum[CUR_TICK] = num_ember_recv_sum_tick;
 
         std::array<hsize_t, 3> slab_start = {hsize_t(CUR_TICK), 0, 0};
         std::array<hsize_t, 3> slab_count = {1, hsize_t(NUM_ROWS), hsize_t(NUM_COLS)};
@@ -723,6 +740,8 @@ static void main_loop(const std::string& file_name) {
 }
 
 int main(int argc, char *argv[]) {
+    auto main_start_time = Clock::now();
+
     argparse::ArgumentParser program(argv[0]);
     program.add_description("Fire spread simulator.");
 
@@ -838,9 +857,17 @@ int main(int argc, char *argv[]) {
 
     {{ alloc_jump_var_mem("jump_alias_large_q", "std::int32_t") }}
 
-    fmt::println("total_alloc_gb = {}", total_alloc_bytes / 1e9);
+    {{ alloc_tick_var_mem("num_unburned", "std::int32_t") }}
 
-    initialize_memory();
+    {{ alloc_tick_var_mem("num_burning", "std::int32_t") }}
+
+    {{ alloc_tick_var_mem("num_burnt_out", "std::int32_t") }}
+
+    {{ alloc_tick_var_mem("num_ember_gen_sum", "std::int32_t") }}
+
+    {{ alloc_tick_var_mem("num_ember_recv_sum", "std::int32_t") }}
+
+    fmt::println("total_alloc_gb = {}", total_alloc_bytes / 1e9);
 
     std::random_device rnd_device;
     auto seed = rnd_device();
@@ -863,6 +890,9 @@ int main(int argc, char *argv[]) {
         }
     });
 
+    auto init_start_time = Clock::now();
+    initialize_memory();
+
     load_tile_data(tile_file_name);
     load_seed_data(seed_file_name);
     auto status = load_tick_data(tick_file_name);
@@ -870,14 +900,83 @@ int main(int argc, char *argv[]) {
         throw std::runtime_error(fmt::format("Failed to read tick data: {}", status.ToString()));
     }
 
-    main_loop(output_file_name);
+    double init_duration = Duration(Clock::now() - init_start_time).count();
+
+    H5::H5File output_file(output_file_name, H5F_ACC_CREAT | H5F_ACC_RDWR);
+
+    auto main_loop_start_time = Clock::now();
+    main_loop(output_file);
+    double main_loop_duration = Duration(Clock::now() - main_loop_start_time).count();
+
+    {
+        std::array<hsize_t, 1> dims = {hsize_t(NUM_TICKS)};
+        auto dataspace = H5::DataSpace(dims.size(), dims.data());
+        auto datatype = H5::PredType::NATIVE_INT32;
+
+        {
+            auto dataset = output_file.createDataSet("num_unburned", datatype, dataspace);
+            dataset.write(num_unburned.data_handle(), datatype);
+        }
+
+        {
+            auto dataset = output_file.createDataSet("num_burning", datatype, dataspace);
+            dataset.write(num_burning.data_handle(), datatype);
+        }
+
+        {
+            auto dataset = output_file.createDataSet("num_burnt_out", datatype, dataspace);
+            dataset.write(num_burnt_out.data_handle(), datatype);
+        }
+
+        {
+            auto dataset = output_file.createDataSet("num_ember_gen_sum", datatype, dataspace);
+            dataset.write(num_ember_gen_sum.data_handle(), datatype);
+        }
+
+        {
+            auto dataset = output_file.createDataSet("num_ember_recv_sum", datatype, dataspace);
+            dataset.write(num_ember_recv_sum.data_handle(), datatype);
+        }
+    }
 
     double log_prob = 0.0;
     #pragma omp parallel reduction(+: log_prob)
     {
         log_prob += thread_state->log_prob;
     }
-    fmt::println("log_prob = {}", log_prob);
+
+    double main_duration = Duration(Clock::now() - main_start_time).count();
+    fmt::println("main_duration_s = {}", main_duration);
+
+    {
+        auto dataspace = H5::DataSpace(H5S_SCALAR);
+        auto datatype = H5::PredType::NATIVE_DOUBLE;
+
+        {
+            auto attribute = output_file.createAttribute("main_duration_s", datatype, dataspace);
+            attribute.write(datatype, &main_duration);
+        }
+
+        {
+            auto attribute = output_file.createAttribute("init_duration_s", datatype, dataspace);
+            attribute.write(datatype, &init_duration);
+        }
+
+        {
+            auto attribute = output_file.createAttribute("main_loop_duration_s", datatype, dataspace);
+            attribute.write(datatype, &main_loop_duration);
+        }
+
+        {
+            auto attribute = output_file.createAttribute("total_alloc_bytes", datatype, dataspace);
+            attribute.write(datatype, &total_alloc_bytes);
+        }
+
+        {
+            auto attribute = output_file.createAttribute("log_prob", datatype, dataspace);
+            attribute.write(datatype, &log_prob);
+        }
+    }
 
     return 0;
 }
