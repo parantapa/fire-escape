@@ -1,10 +1,12 @@
 {#- name: "assignment_stmt" -#}
 #line {{ pos.line }} "{{ pos.file }}"
 {{ lvalue }} = {{ rvalue }} ;
+#endline
 
 {#- name: "update_stmt" -#}
 #line {{ pos.line }} "{{ pos.file }}"
 {{ lvalue }} {{ op }} {{ rvalue }} ;
+#endline
 
 {#- name: "return_stmt" -#}
 #line {{ pos.line }} "{{ pos.file }}"
@@ -13,6 +15,7 @@ return {{ arg }} ;
 {% else %}
 return ;
 {% endif %}
+#endline
 
 {#- name: "else_section" -#}
 #line {{ pos.line }} "{{ pos.file }}"
@@ -21,6 +24,7 @@ else {
     {{ stmt | indent }}
     {% endfor %}
 }
+#endline
 
 {#- name: "elif_section" -#}
 #line {{ pos.line }} "{{ pos.file }}"
@@ -29,6 +33,7 @@ else if ({{ condition }}) {
     {{ stmt | indent }}
     {% endfor %}
 }
+#endline
 
 {#- name: "if_stmt" -#}
 #line {{ pos.line }} "{{ pos.file }}"
@@ -41,6 +46,7 @@ if ({{ condition }}) {
 {{ elif }}
 {% endfor %}
 {{ else_ }}
+#endline
 
 {#- name: "func_decl" -#}
 static inline {{ rtype }} {{ name }}( {{ ptypes | join(", ") }} ) ;
@@ -56,6 +62,7 @@ static inline {{ rtype }} {{ name }}( {{ ptypes | join(", ") }} ) ;
     {{ stmt | indent }}
     {% endfor %}
 }
+#endline
 
 {#- name: "simulator.cpp" -#}
 #include <cmath>
@@ -154,6 +161,13 @@ static inline float poisson_log_prob(std::int32_t x, float rate) {
     return x * std::logf(rate) - rate - std::lgammaf(x + 1);
 }
 
+struct alignas(std::hardware_constructive_interference_size) ThreadState {
+    RngEngine rng;
+    double log_prob;
+};
+
+ThreadState* thread_state = nullptr;
+#pragma omp threadprivate (thread_state)
 
 {% for opt in source.options %}
 constexpr std::int32_t {{ opt.name | upper }} = {{ opt.value }};
@@ -163,14 +177,6 @@ static std::int32_t NUM_TICKS = 0;
 static std::int32_t NUM_ROWS = 0;
 static std::int32_t NUM_COLS = 0;
 static std::int32_t CUR_TICK = 0;
-
-struct alignas(std::hardware_constructive_interference_size) ThreadState {
-    RngEngine rng;
-    double log_prob;
-};
-
-ThreadState* thread_state = nullptr;
-#pragma omp threadprivate (thread_state)
 
 static inline bool is_valid_position(std::int32_t x, std::int32_t y) {
     return x >= 0 && x < NUM_ROWS && y >= 0 && y <= NUM_COLS;
@@ -908,75 +914,54 @@ int main(int argc, char *argv[]) {
     main_loop(output_file);
     double main_loop_duration = Duration(Clock::now() - main_loop_start_time).count();
 
+    {% macro save_tick_stat(name, h5_type) %}
     {
         std::array<hsize_t, 1> dims = {hsize_t(NUM_TICKS)};
         auto dataspace = H5::DataSpace(dims.size(), dims.data());
-        auto datatype = H5::PredType::NATIVE_INT32;
-
-        {
-            auto dataset = output_file.createDataSet("num_unburned", datatype, dataspace);
-            dataset.write(num_unburned.data_handle(), datatype);
-        }
-
-        {
-            auto dataset = output_file.createDataSet("num_burning", datatype, dataspace);
-            dataset.write(num_burning.data_handle(), datatype);
-        }
-
-        {
-            auto dataset = output_file.createDataSet("num_burnt_out", datatype, dataspace);
-            dataset.write(num_burnt_out.data_handle(), datatype);
-        }
-
-        {
-            auto dataset = output_file.createDataSet("num_ember_gen_sum", datatype, dataspace);
-            dataset.write(num_ember_gen_sum.data_handle(), datatype);
-        }
-
-        {
-            auto dataset = output_file.createDataSet("num_ember_recv_sum", datatype, dataspace);
-            dataset.write(num_ember_recv_sum.data_handle(), datatype);
-        }
+        auto datatype = {{ h5_type }};
+        auto dataset = output_file.createDataSet("{{ name }}", datatype, dataspace);
+        dataset.write({{ name }}.data_handle(), datatype);
     }
+    {% endmacro %}
+
+    {{ save_tick_stat("num_unburned", "H5::PredType::NATIVE_INT32") }}
+
+    {{ save_tick_stat("num_burning", "H5::PredType::NATIVE_INT32") }}
+
+    {{ save_tick_stat("num_burnt_out", "H5::PredType::NATIVE_INT32") }}
+
+    {{ save_tick_stat("num_ember_gen_sum", "H5::PredType::NATIVE_INT32") }}
+
+    {{ save_tick_stat("num_ember_recv_sum", "H5::PredType::NATIVE_INT32") }}
 
     double log_prob = 0.0;
     #pragma omp parallel reduction(+: log_prob)
     {
         log_prob += thread_state->log_prob;
     }
+    fmt::println("log_prob = {}", log_prob);
 
     double main_duration = Duration(Clock::now() - main_start_time).count();
     fmt::println("main_duration_s = {}", main_duration);
 
+    {% macro save_run_stat(name, var_name, h5_type) %}
     {
         auto dataspace = H5::DataSpace(H5S_SCALAR);
-        auto datatype = H5::PredType::NATIVE_DOUBLE;
-
-        {
-            auto attribute = output_file.createAttribute("main_duration_s", datatype, dataspace);
-            attribute.write(datatype, &main_duration);
-        }
-
-        {
-            auto attribute = output_file.createAttribute("init_duration_s", datatype, dataspace);
-            attribute.write(datatype, &init_duration);
-        }
-
-        {
-            auto attribute = output_file.createAttribute("main_loop_duration_s", datatype, dataspace);
-            attribute.write(datatype, &main_loop_duration);
-        }
-
-        {
-            auto attribute = output_file.createAttribute("total_alloc_bytes", datatype, dataspace);
-            attribute.write(datatype, &total_alloc_bytes);
-        }
-
-        {
-            auto attribute = output_file.createAttribute("log_prob", datatype, dataspace);
-            attribute.write(datatype, &log_prob);
-        }
+        auto datatype = {{ h5_type }};
+        auto attribute = output_file.createAttribute("{{ name }}", datatype, dataspace);
+        attribute.write(datatype, &{{ var_name }});
     }
+    {% endmacro %}
+
+    {{ save_run_stat("main_duration_s", "main_duration", "H5::PredType::NATIVE_DOUBLE") }}
+
+    {{ save_run_stat("init_duration_s", "init_duration", "H5::PredType::NATIVE_DOUBLE") }}
+
+    {{ save_run_stat("main_loop_duration_s", "main_loop_duration", "H5::PredType::NATIVE_DOUBLE") }}
+
+    {{ save_run_stat("total_alloc_bytes", "total_alloc_bytes", "H5::PredType::NATIVE_DOUBLE") }}
+
+    {{ save_run_stat("log_prob", "log_prob", "H5::PredType::NATIVE_DOUBLE") }}
 
     return 0;
 }

@@ -355,11 +355,19 @@ def codegen_openmp_cpu(node: AstNode | tuple[AstNode, str]) -> str:
                 fn_decls.append(codegen_openmp_cpu((fn, "decl")))
                 fn_defns.append(codegen_openmp_cpu((fn, "defn")))
 
-            return render(
+            lines = render(
                 "openmp-cpu:simulator.cpp",
                 source=source,
                 fn_decls=fn_decls,
                 fn_defns=fn_defns,
-            )
+            ).split("\n")
+
+            new_lines = []
+            for i, line in enumerate(lines, 1):
+                if line.strip() == "#endline":
+                    line = line.replace("#endline", f'#line {i} "simulator.cpp"')
+                new_lines.append(line)
+
+            return "\n".join(new_lines)
 
     raise CompilerError(f"unexpected node type {node=}")
