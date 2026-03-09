@@ -1,0 +1,6 @@
+{
+    project: "fire-escape",
+    remotes: {
+        rivanna: "rivanna:fire-escape",
+    }
+}
