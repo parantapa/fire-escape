@@ -111,12 +111,12 @@ static inline float distance(Position a, Position b) {
 
 static inline float alignment(Position a, Position b, float direction) {
     float dx = b.x - a.x;
-    float dy = b.y - a.y;
+    float dy = -(b.y - a.y);
 
     float d_abs = std::hypotf(dx, dy);
 
-    float wx = std::cosf(direction / 360.0);
-    float wy = -std::sinf(direction / 360.0);
+    float wx = std::sinf(direction / 360.0);
+    float wy = std::cosf(direction / 360.0);
 
     return (dx * wx + dy * wy) / d_abs;
 }
