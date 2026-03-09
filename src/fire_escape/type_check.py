@@ -263,7 +263,7 @@ def check_type(node: AstNode, env: TypeEnv):
             case IfStmt() as stmt:
                 cond_type = get_type(stmt.condition)
                 if not env.is_numeric(cond_type):
-                    raise TypeError("Testexpression type not boolean or numeric")
+                    raise TypeError("Test expression type not boolean or numeric")
 
             case ElifSection() as stmt:
                 cond_type = get_type(stmt.condition)
@@ -273,6 +273,36 @@ def check_type(node: AstNode, env: TypeEnv):
             case Func() as func:
                 if func.rtype is not None and not func.return_stmts:
                     raise TypeError("Function with defined return types must return")
+
+            case TickData() as tick_data:
+                if not env.is_integral(get_type(tick_data.key_var.type)):
+                    raise TypeError(
+                        "Key attribute of tick data must be of integral type",
+                        tick_data.key_var.type.pos,
+                    )
+
+            case PoissonDist() as dist:
+                if not env.is_numeric(get_type(dist.mean)):
+                    raise TypeError("Expected numeric expression", dist.mean.pos)
+
+            case NormalDist() as dist:
+                if not env.is_numeric(get_type(dist.mean)):
+                    raise TypeError("Expected numeric expression", dist.mean.pos)
+
+                if not env.is_numeric(get_type(dist.std)):
+                    raise TypeError("Expected numeric expression", dist.std.pos)
+
+            case EmberJumpLikelihood():
+                if not env.is_numeric(get_type(node.like)):
+                    raise TypeError("Expected numeric expression", node.like.pos)
+
+            case EmberDeathProb():
+                if not env.is_numeric(get_type(node.prob)):
+                    raise TypeError("Expected numeric expression", node.prob.pos)
+
+            case IgnitionProb():
+                if not env.is_numeric(get_type(node.prob)):
+                    raise TypeError("Expected numeric expression", node.prob.pos)
 
     except CodeError as e:
         e.pos = node.pos if e.pos is None else e.pos

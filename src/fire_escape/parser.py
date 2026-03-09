@@ -585,6 +585,42 @@ def populate_tile_objects(node: AstNode, tile_data: TileData):
         populate_tile_objects(child, tile_data)
 
 
+def populate_source_opts(source: Source):
+    source.opts["max_jump_x"] = 1
+    source.opts["max_jump_y"] = 1
+    source.opts["max_ember_count"] = 100
+
+    for opt in source.options:
+        if opt.name not in source.opts:
+            raise CodeError(f"Unknown option {opt.name}", pos=opt.pos)
+        source.opts[opt.name] = opt.value
+
+
+def validate_tick_data(tick_data: TickData):
+    num_keys = sum(1 for var in tick_data.tick_vars if "key" in var.annots)
+    if num_keys != 1:
+        raise CodeError(
+            "One and only one attribute of tick data annotated as 'key' attribute",
+            tick_data.pos,
+        )
+
+
+def validate_tile_data(tile_data: TileData):
+    num_positions = sum(1 for var in tile_data.tile_vars if var.type.name == "position")
+    if num_positions != 1:
+        raise CodeError(
+            "One and only one attribute of tile data must have type 'position'",
+            tile_data.pos,
+        )
+
+    num_states = sum(1 for var in tile_data.tile_vars if var.type.name == "fire_state")
+    if num_states != 1:
+        raise CodeError(
+            "One and only one attribute of tile data must have type 'fire_state'",
+            tile_data.pos,
+        )
+
+
 def parse(file: str, text: str):
     parser = get_parser()
 
@@ -594,12 +630,14 @@ def parse(file: str, text: str):
     root_scope = ChainMap()
     add_builtins(root_scope)
     build_scope(source, root_scope)
-
     assert source.scope is not None
 
     collect_local_varaibles(source)
     link_return_statements(source, None)
     populate_tile_objects(source, source.tile_data)
+    populate_source_opts(source)
+    validate_tick_data(source.tick_data)
+    validate_tile_data(source.tile_data)
 
     env = TypeEnv.new()
     check_type(source, env)

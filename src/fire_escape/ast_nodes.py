@@ -246,6 +246,14 @@ class TileVar(AstNode):
     def is_real(self) -> bool:
         return self.type.name != "position"
 
+    @property
+    def is_seeded(self) -> bool:
+        return "seed" in self.annots
+
+    @property
+    def is_saved(self) -> bool:
+        return "save" in self.annots
+
 
 class TileData(AstNode):
     tile_vars: list[TileVar]
@@ -315,4 +323,5 @@ class Source(AstNode):
     tick_data: TickData
     tile_data: TileData
     fire_model: FireModel
+    opts: dict[str, int] = Field(default_factory=dict, repr=False)
     scope: ChainMap[str, Any] | None = Field(default=None, repr=False)
