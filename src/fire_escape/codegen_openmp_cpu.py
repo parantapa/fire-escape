@@ -1,7 +1,11 @@
 """Code generation."""
 
+from pathlib import Path
+
+import click
 import jinja2
 
+from .parser import parse
 from .ast_nodes import *
 from .builtins import *
 from .error import CompilerError
@@ -12,6 +16,7 @@ ENVIRONMENT = jinja2.Environment(
     lstrip_blocks=True,
     undefined=jinja2.StrictUndefined,
     loader=jinja2.FunctionLoader(load_template),
+    extensions=["jinja2.ext.debug", "jinja2.ext.do"],
 )
 
 
@@ -311,7 +316,7 @@ def codegen_stmt(node: AstNode) -> str:
     raise CompilerError(f"unexpected node type {node=}")
 
 
-def codegen_openmp_cpu(node: AstNode | tuple[AstNode, str]) -> str:
+def codegen(node: AstNode | tuple[AstNode, str]) -> str:
     match node:
         case [Func() as fn, "decl"]:
             rtype = "void" if fn.rtype is None else cpp_type(fn.rtype.name)
@@ -352,8 +357,8 @@ def codegen_openmp_cpu(node: AstNode | tuple[AstNode, str]) -> str:
             fn_defns = []
 
             for fn in source.funcs:
-                fn_decls.append(codegen_openmp_cpu((fn, "decl")))
-                fn_defns.append(codegen_openmp_cpu((fn, "defn")))
+                fn_decls.append(codegen((fn, "decl")))
+                fn_defns.append(codegen((fn, "defn")))
 
             lines = render(
                 "openmp-cpu:simulator.cpp",
@@ -371,3 +376,41 @@ def codegen_openmp_cpu(node: AstNode | tuple[AstNode, str]) -> str:
             return "\n".join(new_lines)
 
     raise CompilerError(f"unexpected node type {node=}")
+
+
+@click.group()
+def openmp_cpu():
+    """Code generator for OpenMP CPU backend."""
+
+
+@openmp_cpu.command()
+@click.option(
+    "-i",
+    "--input-file",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="FFSL simulator code.",
+)
+@click.option(
+    "-o",
+    "--output-dir",
+    required=True,
+    type=click.Path(exists=False, file_okay=False, dir_okay=True, path_type=Path),
+    help="C++ project directory.",
+)
+def compile(input_file: Path, output_dir: Path):
+    """Compile the FFSL code to a C++ project."""
+    output_dir.mkdir(exist_ok=True, parents=True, mode=0o755)
+    source = parse(str(input_file), input_file.read_text())
+
+    with open(output_dir / "simulator.cpp", "wt") as fobj:
+        code = codegen(source)
+        fobj.write(code)
+
+    with open(output_dir / "CMakeLists.txt", "wt") as fobj:
+        code = render("openmp-cpu:CMakeLists.txt")
+        fobj.write(code)
+
+    with open(output_dir / "conanfile.py", "wt") as fobj:
+        code = render("openmp-cpu:conanfile.py")
+        fobj.write(code)

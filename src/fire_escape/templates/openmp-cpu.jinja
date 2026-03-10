@@ -161,25 +161,54 @@ static inline float poisson_log_prob(std::int32_t x, float rate) {
     return x * std::logf(rate) - rate - std::lgammaf(x + 1);
 }
 
+{% set proc_phase_vars = ["prog", "init", "read_input", "write_output", "main"] %}
+{% for name in proc_phase_vars %}
+Clock::time_point {{ name }}_start_time{};
+double {{ name }}_duration = 0;
+
+{% endfor %}
+
+{% macro proc_phase_begin(name) %}
+{{ name }}_start_time = Clock::now();
+{% endmacro %}
+
+{% macro proc_phase_end(name) %}
+{{ name }}_duration += Duration(Clock::now() - {{ name }}_start_time).count();
+{% endmacro %}
+
+{%
+    set tick_thread_phase_vars = [
+        "reset_for_tick",
+        "create_embers",
+        "compute_jump_dist",
+        "assign_embers",
+        "do_ignition",
+        "do_transition",
+        "count_states"
+    ]
+%}
+
 struct alignas(std::hardware_constructive_interference_size) ThreadState {
     RngEngine rng;
     double log_prob;
 
-    {% macro tick_thread_duration(name) %}
-    std::vector<double> {{ name }}_duration;
-    {% endmacro %}
+    {% for var in tick_thread_phase_vars %}
+    std::vector<Clock::time_point> {{ var }}_start_time;
+    std::vector<double> {{ var }}_duration;
 
-    {{ tick_thread_duration("reset_for_tick") }}
-    {{ tick_thread_duration("create_embers") }}
-    {{ tick_thread_duration("compute_jump_dist") }}
-    {{ tick_thread_duration("assign_embers") }}
-    {{ tick_thread_duration("do_ignition") }}
-    {{ tick_thread_duration("do_transition") }}
-    {{ tick_thread_duration("count_states") }}
+    {% endfor %}
 };
 
 ThreadState* thread_state = nullptr;
 #pragma omp threadprivate (thread_state)
+
+{% macro tick_thread_phase_begin(name) %}
+thread_state->{{ name }}_start_time[CUR_TICK] = Clock::now();
+{% endmacro %}
+
+{% macro tick_thread_phase_end(name) %}
+thread_state->{{ name }}_duration[CUR_TICK] += Duration(Clock::now() - thread_state->{{ name }}_start_time[CUR_TICK]).count();
+{% endmacro %}
 
 {% for opt in source.options %}
 constexpr std::int32_t {{ opt.name | upper }} = {{ opt.value }};
@@ -198,33 +227,55 @@ static inline bool is_valid_position(std::int32_t x, std::int32_t y) {
 static {{ cfg.type.name | cpp_type_config }} {{ cfg.name | mangle }} = {{ cfg.type.name | cpp_init }};
 {% endfor %}
 
+{% set tick_vars = [
+    ("num_unburned", "std::int32_t"),
+    ("num_burning", "std::int32_t"),
+    ("num_burnt_out", "std::int32_t"),
+    ("num_ember_gen_sum", "std::int32_t"),
+    ("num_ember_recv_sum", "std::int32_t"),
+] %}
+
 {% for var in source.tick_data.tick_vars %}
 {% if var.is_real %}
-static stdex::mdspan<{{ var.type.name | cpp_type }}, tick_extents_t> {{ var.name | mangle }};
+{% do tick_vars.append((var.name | mangle, var.type.name | cpp_type)) %}
 {% endif %}
 {% endfor %}
+
+{% for name, type in tick_vars %}
+static stdex::mdspan<{{ type }}, tick_extents_t> {{ name }};
+{% endfor %}
+
+{%
+    set tile_vars = [
+        ("change_time", "std::int32_t"),
+        ("num_ember_gen", "std::int32_t"),
+        ("num_ember_recv", "std::int32_t")
+    ]
+%}
 
 {% for var in source.tile_data.tile_vars %}
 {% if var.is_real %}
-static stdex::mdspan<{{ var.type.name | cpp_type }}, tile_extents_t> {{ var.name | mangle }};
+{% do tile_vars.append((var.name | mangle, var.type.name | cpp_type)) %}
 {% endif %}
 {% endfor %}
 
-static stdex::mdspan<std::int32_t, tile_extents_t> change_time;
-static stdex::mdspan<std::int32_t, tile_extents_t> num_ember_gen;
-static stdex::mdspan<std::int32_t, tile_extents_t> num_ember_recv;
+{% for name, type in tile_vars %}
+static stdex::mdspan<{{ type }}, tile_extents_t> {{ name }};
+{% endfor %}
 
-static stdex::mdspan<float, jump_extents_t> jump_like;
-static stdex::mdspan<std::int32_t, jump_extents_t> jump_alias_index;
-static stdex::mdspan<float, jump_extents_t> jump_alias_prob;
-static stdex::mdspan<std::int32_t, jump_extents_t> jump_alias_small_q;
-static stdex::mdspan<std::int32_t, jump_extents_t> jump_alias_large_q;
+{%
+    set jump_vars = [
+        ("jump_like", "float"),
+        ("jump_alias_index", "std::int32_t"),
+        ("jump_alias_prob", "float"),
+        ("jump_alias_small_q", "std::int32_t"),
+        ("jump_alias_large_q", "std::int32_t"),
+    ]
+%}
 
-static stdex::mdspan<std::int32_t, tick_extents_t> num_unburned;
-static stdex::mdspan<std::int32_t, tick_extents_t> num_burning;
-static stdex::mdspan<std::int32_t, tick_extents_t> num_burnt_out;
-static stdex::mdspan<std::int32_t, tick_extents_t> num_ember_gen_sum;
-static stdex::mdspan<std::int32_t, tick_extents_t> num_ember_recv_sum;
+{% for name, type in jump_vars %}
+static stdex::mdspan<{{ type }}, jump_extents_t> {{ name }};
+{% endfor %}
 
 {% for fn_decl in fn_decls %}
 {{ fn_decl }}
@@ -235,114 +286,57 @@ static stdex::mdspan<std::int32_t, tick_extents_t> num_ember_recv_sum;
 
 {% endfor %}
 
-{% macro omp_foreach_tick(simd) %}
-{% if simd %}
-#pragma omp simd
-{% endif %}
-for (std::int32_t i = 0; i < NUM_TICKS; i++) {
-    {{ caller() }}
-}
-{% endmacro %}
-
-{% macro omp_foreach_tile(schedule, nowait, simd) %}
-#pragma omp for {% if simd %}simd{% endif %} collapse(2) schedule({{ schedule }}) {% if nowait %}nowait{% endif +%}
-for (std::int32_t x = 0; x < NUM_ROWS; x++) {
-    for (std::int32_t y = 0; y < NUM_COLS; y++) {
-        {{ caller() }}
-    }
-}
-{% endmacro %}
-
-{% macro omp_foreach_jump(schedule, nowait, simd) %}
-#pragma omp for {% if simd %}simd{% endif %} collapse(2) schedule({{ schedule }}) {% if nowait %}nowait{% endif +%}
-for (std::int32_t x = 0; x < NUM_ROWS; x++) {
-    for (std::int32_t y = 0; y < NUM_COLS; y++) {
-        for (std::int32_t idx = 0; idx < 2 * MAX_JUMP_X + 1; idx++) {
-            for (std::int32_t idy = 0; idy < 2 * MAX_JUMP_Y + 1; idy++) {
-                {{ caller() }}
-            }
-        }
-    }
-}
-{% endmacro %}
-
 static void initialize_memory() {
-    {% macro init_tick_var(name) %}
-    {% call omp_foreach_tick(simd=True) %}
+    {% for name, _ in tick_vars %}
+    #pragma omp simd
+    for (std::int32_t i = 0; i < NUM_TICKS; i++) {
 	{{ name }}[i] = 0;
-    {% endcall %}
-    {% endmacro %}
+    }
 
-    {% for var in source.tick_data.tick_vars %}
-    {% if var.is_real %}
-    {{ init_tick_var(var.name | mangle) }}
-
-    {% endif %}
     {% endfor %}
 
     #pragma omp parallel
     {
-        {% macro init_tile_var(name, value=0) -%}
-        {% call omp_foreach_tile(schedule="static", nowait=True, simd=True) %}
-            {{ name }}[x, y] = {{ value }};
-        {% endcall %}
-        {% endmacro %}
+        {% for name, _ in tile_vars %}
+        #pragma omp for simd collapse(2) schedule(static) nowait
+        for (std::int32_t x = 0; x < NUM_ROWS; x++) {
+            for (std::int32_t y = 0; y < NUM_COLS; y++) {
+                {{ name }}[x, y] = 0;
+            }
+        }
 
-        {% macro init_jump_var(name) %}
-        {% call omp_foreach_jump(schedule="static", nowait=True, simd=True) %}
-            {{ name }}[x, y, idx, idy] = 0;
-        {% endcall %}
-        {% endmacro %}
-
-        {% for var in source.tile_data.tile_vars %}
-        {% if var.is_real %}
-        {{ init_tile_var(var.name | mangle) }}
-
-        {% endif %}
         {% endfor %}
 
-        {{ init_tile_var("change_time", value=-1) }}
+        {% for name, _ in jump_vars %}
+        #pragma omp for simd collapse(2) schedule(static) nowait
+        for (std::int32_t x = 0; x < NUM_ROWS; x++) {
+            for (std::int32_t y = 0; y < NUM_COLS; y++) {
+                for (std::int32_t idx = 0; idx < 2 * MAX_JUMP_X + 1; idx++) {
+                    for (std::int32_t idy = 0; idy < 2 * MAX_JUMP_Y + 1; idy++) {
+                        {{ name }}[x, y, idx, idy] = 0;
+                    }
+                }
+            }
+        }
 
-        {{ init_tile_var("num_ember_gen") }}
-
-        {{ init_tile_var("num_ember_recv") }}
-
-        {{ init_jump_var("jump_like") }}
-
-        {{ init_jump_var("jump_alias_index") }}
-
-        {{ init_jump_var("jump_alias_prob") }}
-
-        {{ init_jump_var("jump_alias_small_q") }}
-
-        {{ init_jump_var("jump_alias_large_q") }}
+        {% endfor %}
     }
-
-    {{ init_tick_var("num_unburned") }}
-
-    {{ init_tick_var("num_burning") }}
-
-    {{ init_tick_var("num_burnt_out") }}
-
-    {{ init_tick_var("num_ember_gen_sum") }}
-
-    {{ init_tick_var("num_ember_recv_sum") }}
 }
 
 static void load_tile_data(const std::string& file_name) {
     H5::H5File file = H5::H5File(file_name, H5F_ACC_RDONLY);
-    std::array<hsize_t, 2> dims = {hsize_t(NUM_ROWS), hsize_t(NUM_COLS)};
 
     {% for var in source.tile_data.tile_vars %}
     {% if var.is_real and not var.is_seeded %}
     {
+        std::array<hsize_t, 2> dims = {hsize_t(NUM_ROWS), hsize_t(NUM_COLS)};
         auto dataspace = H5::DataSpace(dims.size(), dims.data());
         auto datatype = {{ var.type.name | h5_type }};
         auto dataset = file.openDataSet("{{ var.name }}");
         dataset.read({{ var.name | mangle }}.data_handle(), datatype, dataspace);
     }
-    {% endif %}
 
+    {% endif %}
     {% endfor %}
 }
 
@@ -358,12 +352,12 @@ static void load_seed_data(const std::string& file_name) {
         auto dataset = file.openDataSet("{{ var.name }}");
         dataset.read({{ var.name | mangle }}.data_handle(), datatype, dataspace);
     }
-    {% endif %}
 
+    {% endif %}
     {% endfor %}
 }
 
-static void seed_change_time() {
+static void init_change_time() {
     #pragma omp parallel
     {
         #pragma omp for collapse(2) schedule(guided)
@@ -380,7 +374,8 @@ static void seed_change_time() {
                     burn_time = std::roundf(burn_time);
 
                     change_time[x, y] = burn_time;
-
+                } else {
+                    change_time[x, y] = -1;
                 }
             }
         }
@@ -532,10 +527,223 @@ static inline float alias_table_log_prob(std::int32_t idx, std::int32_t idy, std
     return jump_like[x, y, idx, idy];
 }
 
-static double main_loop(H5::H5File& file) {
-    double write_output_duration = 0.0;
-    auto write_output_start_time = Clock::now();
+static void execute_tick() {
+    fmt::println("tick = {}", CUR_TICK);
 
+    std::int32_t num_unburned_tick = 0;
+    std::int32_t num_burning_tick = 0;
+    std::int32_t num_burnt_out_tick = 0;
+    std::int32_t num_ember_gen_sum_tick = 0;
+    std::int32_t num_ember_recv_sum_tick = 0;
+
+    #pragma omp parallel
+    {
+        // Reset for tick
+        {{ tick_thread_phase_begin("reset_for_tick") }}
+
+        {% set tile_vars_to_reset = ["num_ember_gen", "num_ember_recv"] %}
+        {% for name in tile_vars_to_reset %}
+        #pragma omp for simd collapse(2) schedule(static) nowait
+        for (std::int32_t x = 0; x < NUM_ROWS; x++) {
+            for (std::int32_t y = 0; y < NUM_COLS; y++) {
+                {{ name }}[x, y] = 0;
+            }
+        }
+
+        {% endfor %}
+
+        {% set jump_vars_to_reset = [
+                "jump_like",
+                "jump_alias_index",
+                "jump_alias_prob",
+                "jump_alias_small_q",
+                "jump_alias_large_q"
+            ]
+        %}
+        {% for name in jump_vars_to_reset %}
+        #pragma omp for simd collapse(2) schedule(static) nowait
+        for (std::int32_t x = 0; x < NUM_ROWS; x++) {
+            for (std::int32_t y = 0; y < NUM_COLS; y++) {
+                for (std::int32_t idx = 0; idx < 2 * MAX_JUMP_X + 1; idx++) {
+                    for (std::int32_t idy = 0; idy < 2 * MAX_JUMP_Y + 1; idy++) {
+                        {{ name }}[x, y, idx, idy] = 0;
+                    }
+                }
+            }
+        }
+
+        {% endfor %}
+
+        {{ tick_thread_phase_end("reset_for_tick") }}
+
+        // Create embers
+        {{ tick_thread_phase_begin("create_embers") }}
+        #pragma omp for reduction(+: num_ember_gen_sum_tick) collapse(2) schedule(guided)
+        for (std::int32_t x = 0; x < NUM_ROWS; x++) {
+            for (std::int32_t y = 0; y < NUM_COLS; y++) {
+                if ({{ source.tile_data.state_var.name | mangle }}[x, y] == Burning) [[unlikely]] {
+                    [[maybe_unused]] Position pos{x, y};
+
+                    // clang-format off
+                    float rate = {{ source.fire_model.create_embers.dist.mean | codegen_expr }};
+                    // clang-format on
+                    rate = std::max<float>(0.0, rate);
+
+                    if (rate > 0.0) {
+                        auto count = sample_poisson(thread_state->rng, rate);
+                        thread_state->log_prob += poisson_log_prob(count, rate);
+
+                        count = std::min(count, MAX_EMBER_COUNT);
+                        num_ember_gen[x, y] = count;
+                        num_ember_gen_sum_tick += count;
+                    }
+                }
+            }
+        }
+        {{ tick_thread_phase_end("create_embers") }}
+
+        // Compute jump dist
+        {{ tick_thread_phase_begin("compute_jump_dist") }}
+        #pragma omp for collapse(2) schedule(guided)
+        for (std::int32_t sx = 0; sx < NUM_ROWS; sx++) {
+            for (std::int32_t sy = 0; sy < NUM_COLS; sy++) {
+                if (num_ember_gen[sx, sy] > 0) [[unlikely]] {
+                    for (std::int32_t dxi = 0; dxi < 2 * MAX_JUMP_X + 1; dxi++) {
+                        for (std::int32_t dyi = 0; dyi < 2 * MAX_JUMP_Y + 1; dyi++) {
+                            std::int32_t dx = sx + dxi - MAX_JUMP_X;
+                            std::int32_t dy = sy + dyi - MAX_JUMP_Y;
+                            if (is_valid_position(dx, dy)) {
+                                [[maybe_unused]] Position src_pos{sx, sy};
+                                [[maybe_unused]] Position dst_pos{dx, dy};
+
+                                // clang-format off
+                                float likelihood = {{ source.fire_model.ember_jump_likelihood.like | codegen_expr }};
+                                // clang-format on
+                                likelihood = std::max<float>(0.0, likelihood);
+
+                                jump_like[sx, sy, dxi, dyi] = likelihood;
+                            }
+                        }
+                    }
+
+                    prepare_alias_table(sx, sy);
+                }
+            }
+        }
+        {{ tick_thread_phase_end("compute_jump_dist") }}
+
+        // Assign embers to receivers
+        {{ tick_thread_phase_begin("assign_embers") }}
+        #pragma omp for reduction(+: num_ember_recv_sum_tick) collapse(2) schedule(guided)
+        for (std::int32_t sx = 0; sx < NUM_ROWS; sx++) {
+            for (std::int32_t sy = 0; sy < NUM_COLS; sy++) {
+                if (num_ember_gen[sx, sy] > 0) [[unlikely]] {
+                    for (std::int32_t ei = 0; ei < num_ember_gen[sx, sy]; ei++) {
+                        auto [dxi, dyi] = sample_alias_table(sx, sy, thread_state->rng);
+                        thread_state->log_prob += alias_table_log_prob(dxi, dyi, sx, sy);
+
+                        std::int32_t dx = sx + dxi - MAX_JUMP_X;
+                        std::int32_t dy = sy + dyi - MAX_JUMP_Y;
+                        if (is_valid_position(dx, dy)) {
+                            [[maybe_unused]] Position src_pos{sx, sy};
+                            [[maybe_unused]] Position dst_pos{dx, dy};
+
+                            // clang-format off
+                            float death_prob = {{ source.fire_model.ember_death_prob.prob | codegen_expr }};
+                            // clang-format on
+                            death_prob = clamp(death_prob, 0.0, 1.0);
+
+                            if (sample_uniform(thread_state->rng) < 1.0 - death_prob) {
+                                #pragma omp atomic update
+                                num_ember_recv[dx, dy] += 1;
+
+                                num_ember_recv_sum_tick += 1;
+                                thread_state->log_prob += std::logf(1.0 - death_prob);
+                            } else {
+                                thread_state->log_prob += std::logf(death_prob);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        {{ tick_thread_phase_end("assign_embers") }}
+
+        // Do ignition
+        {{ tick_thread_phase_begin("do_ignition") }}
+        #pragma omp for collapse(2) schedule(guided)
+        for (std::int32_t x = 0; x < NUM_ROWS; x++) {
+            for (std::int32_t y = 0; y < NUM_COLS; y++) {
+                if ({{ source.tile_data.state_var.name | mangle }}[x, y] == Unburned && num_ember_recv[x, y] > 0) [[unlikely]] {
+                    [[maybe_unused]] Position pos{x, y};
+
+                    // clang-format off
+                    float ignition_prob = {{ source.fire_model.ignition_prob.prob | codegen_expr }};
+                    // clang-format on
+                    ignition_prob = clamp(ignition_prob, 0.0, 1.0);
+                    ignition_prob = 1.0 - std::powf(1.0 - ignition_prob, num_ember_recv[x, y]);
+
+                    if (sample_uniform(thread_state->rng) < ignition_prob) {
+                        thread_state->log_prob += std::logf(ignition_prob);
+
+                        float burn_time_mean = {{ source.fire_model.burn_time.dist.mean | codegen_expr }};
+                        float burn_time_std = {{ source.fire_model.burn_time.dist.std | codegen_expr }};
+                        float burn_time = sample_normal(thread_state->rng);
+                        thread_state->log_prob += normal_log_prob(burn_time);
+
+                        burn_time = burn_time * burn_time_mean + burn_time_std;
+                        burn_time = std::max<float>(0, burn_time);
+                        burn_time = std::roundf(burn_time);
+
+                        {{ source.tile_data.state_var.name | mangle }}[x, y] = Burning;
+                        change_time[x, y] = CUR_TICK + burn_time;
+                    } else {
+                        thread_state->log_prob += std::logf(1.0 - ignition_prob);
+                    }
+                }
+            }
+        }
+        {{ tick_thread_phase_end("do_ignition") }}
+
+        // Do transition
+        {{ tick_thread_phase_begin("do_transition") }}
+        #pragma omp for collapse(2) schedule(guided)
+        for (std::int32_t x = 0; x < NUM_ROWS; x++) {
+            for (std::int32_t y = 0; y < NUM_COLS; y++) {
+                if (change_time[x, y] == CUR_TICK) [[unlikely]] {
+                    {{ source.tile_data.state_var.name | mangle }}[x, y] = BurntOut;
+                    change_time[x, y] = -1;
+                }
+            }
+        }
+        {{ tick_thread_phase_end("do_transition") }}
+
+        // Count states
+        {{ tick_thread_phase_begin("count_states") }}
+        #pragma omp for reduction(+:num_unburned_tick, num_burning_tick, num_burnt_out_tick) collapse(2) schedule(guided)
+        for (std::int32_t x = 0; x < NUM_ROWS; x++) {
+            for (std::int32_t y = 0; y < NUM_COLS; y++) {
+                if ({{ source.tile_data.state_var.name | mangle }}[x, y] == Unburned) {
+                    num_unburned_tick++;
+                } else if ({{ source.tile_data.state_var.name | mangle }}[x, y] == Burning) {
+                    num_burning_tick++;
+                } else {
+                    num_burnt_out_tick++;
+                }
+            }
+        }
+        {{ tick_thread_phase_end("count_states") }}
+
+    } // end parallel
+
+    num_unburned[CUR_TICK] = num_unburned_tick;
+    num_burning[CUR_TICK] = num_burning_tick;
+    num_burnt_out[CUR_TICK] = num_burning_tick;
+    num_ember_gen_sum[CUR_TICK] = num_ember_gen_sum_tick;
+    num_ember_recv_sum[CUR_TICK] = num_ember_recv_sum_tick;
+}
+
+static void main_loop(H5::H5File& file) {
     std::array<hsize_t, 3> full_dims = {hsize_t(NUM_TICKS), hsize_t(NUM_ROWS), hsize_t(NUM_COLS)};
     auto file_space = H5::DataSpace(full_dims.size(), full_dims.data());
 
@@ -548,216 +756,9 @@ static double main_loop(H5::H5File& file) {
     {% endfor %}
 
     for (CUR_TICK = 0; CUR_TICK < NUM_TICKS; CUR_TICK++) {
-        fmt::println("tick = {}", CUR_TICK);
+        execute_tick();
 
-        std::int32_t num_unburned_tick = 0;
-        std::int32_t num_burning_tick = 0;
-        std::int32_t num_burnt_out_tick = 0;
-        std::int32_t num_ember_gen_sum_tick = 0;
-        std::int32_t num_ember_recv_sum_tick = 0;
-
-        #pragma omp parallel
-        {
-            {% macro tick_thread_phase_begin(name) %}
-            auto {{ name }}_start_time = Clock::now();
-            {% endmacro %}
-
-            {% macro tick_thread_phase_end(name) %}
-            thread_state->{{ name }}_duration[CUR_TICK] = Duration(Clock::now() - {{ name }}_start_time).count();
-            {% endmacro %}
-
-            {% macro reset_tile_var(name) %}
-            {% call omp_foreach_tile(schedule="static", nowait=True, simd=True) %}
-                {{ name }}[x, y] = 0;
-            {% endcall %}
-            {% endmacro %}
-
-            {% macro reset_jump_var(name) %}
-            {% call omp_foreach_jump(schedule="static", nowait=True, simd=True) %}
-                {{ name }}[x, y, idx, idy] = 0;
-            {% endcall %}
-            {% endmacro %}
-
-            // Reset for tick
-            {{ tick_thread_phase_begin("reset_for_tick") }}
-
-            {{ reset_tile_var("num_ember_gen") }}
-            {{ reset_tile_var("num_ember_recv") }}
-            {{ reset_jump_var("jump_like") }}
-            {{ reset_jump_var("jump_alias_index") }}
-            {{ reset_jump_var("jump_alias_prob") }}
-            {{ reset_jump_var("jump_alias_small_q") }}
-            {{ reset_jump_var("jump_alias_large_q") }}
-
-            {{ tick_thread_phase_end("reset_for_tick") }}
-
-            // Create embers
-            {{ tick_thread_phase_begin("create_embers") }}
-            #pragma omp for reduction(+: num_ember_gen_sum_tick) collapse(2) schedule(guided)
-            for (std::int32_t x = 0; x < NUM_ROWS; x++) {
-                for (std::int32_t y = 0; y < NUM_COLS; y++) {
-                    if ({{ source.tile_data.state_var.name | mangle }}[x, y] == Burning) [[unlikely]] {
-                        [[maybe_unused]] Position pos{x, y};
-
-                        // clang-format off
-                        float rate = {{ source.fire_model.create_embers.dist.mean | codegen_expr }};
-                        // clang-format on
-                        rate = std::max<float>(0.0, rate);
-
-                        if (rate > 0.0) {
-                            auto count = sample_poisson(thread_state->rng, rate);
-                            thread_state->log_prob += poisson_log_prob(count, rate);
-
-                            count = std::min(count, MAX_EMBER_COUNT);
-                            num_ember_gen[x, y] = count;
-                            num_ember_gen_sum_tick += count;
-                        }
-                    }
-                }
-            }
-            {{ tick_thread_phase_end("create_embers") }}
-
-            // Compute jump dist
-            {{ tick_thread_phase_begin("compute_jump_dist") }}
-            #pragma omp for collapse(2) schedule(guided)
-            for (std::int32_t sx = 0; sx < NUM_ROWS; sx++) {
-                for (std::int32_t sy = 0; sy < NUM_COLS; sy++) {
-                    if (num_ember_gen[sx, sy] > 0) [[unlikely]] {
-                        for (std::int32_t dxi = 0; dxi < 2 * MAX_JUMP_X + 1; dxi++) {
-                            for (std::int32_t dyi = 0; dyi < 2 * MAX_JUMP_Y + 1; dyi++) {
-                                std::int32_t dx = sx + dxi - MAX_JUMP_X;
-                                std::int32_t dy = sy + dyi - MAX_JUMP_Y;
-                                if (is_valid_position(dx, dy)) {
-                                    [[maybe_unused]] Position src_pos{sx, sy};
-                                    [[maybe_unused]] Position dst_pos{dx, dy};
-
-                                    // clang-format off
-                                    float likelihood = {{ source.fire_model.ember_jump_likelihood.like | codegen_expr }};
-                                    // clang-format on
-                                    likelihood = std::max<float>(0.0, likelihood);
-
-                                    jump_like[sx, sy, dxi, dyi] = likelihood;
-                                }
-                            }
-                        }
-
-                        prepare_alias_table(sx, sy);
-                    }
-                }
-            }
-            {{ tick_thread_phase_end("compute_jump_dist") }}
-
-            // Assign embers to receivers
-            {{ tick_thread_phase_begin("assign_embers") }}
-            #pragma omp for reduction(+: num_ember_recv_sum_tick) collapse(2) schedule(guided)
-            for (std::int32_t sx = 0; sx < NUM_ROWS; sx++) {
-                for (std::int32_t sy = 0; sy < NUM_COLS; sy++) {
-                    if (num_ember_gen[sx, sy] > 0) [[unlikely]] {
-                        for (std::int32_t ei = 0; ei < num_ember_gen[sx, sy]; ei++) {
-                            auto [dxi, dyi] = sample_alias_table(sx, sy, thread_state->rng);
-                            thread_state->log_prob += alias_table_log_prob(dxi, dyi, sx, sy);
-
-                            std::int32_t dx = sx + dxi - MAX_JUMP_X;
-                            std::int32_t dy = sy + dyi - MAX_JUMP_Y;
-                            if (is_valid_position(dx, dy)) {
-                                [[maybe_unused]] Position src_pos{sx, sy};
-                                [[maybe_unused]] Position dst_pos{dx, dy};
-
-                                // clang-format off
-                                float death_prob = {{ source.fire_model.ember_death_prob.prob | codegen_expr }};
-                                // clang-format on
-                                death_prob = clamp(death_prob, 0.0, 1.0);
-
-                                if (sample_uniform(thread_state->rng) < 1.0 - death_prob) {
-                                    #pragma omp atomic update
-                                    num_ember_recv[dx, dy] += 1;
-
-                                    num_ember_recv_sum_tick += 1;
-                                    thread_state->log_prob += std::logf(1.0 - death_prob);
-                                } else {
-                                    thread_state->log_prob += std::logf(death_prob);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            {{ tick_thread_phase_end("assign_embers") }}
-
-            // Do ignition
-            {{ tick_thread_phase_begin("do_ignition") }}
-            #pragma omp for collapse(2) schedule(guided)
-            for (std::int32_t x = 0; x < NUM_ROWS; x++) {
-                for (std::int32_t y = 0; y < NUM_COLS; y++) {
-                    if ({{ source.tile_data.state_var.name | mangle }}[x, y] == Unburned && num_ember_recv[x, y] > 0) [[unlikely]] {
-                        [[maybe_unused]] Position pos{x, y};
-
-                        // clang-format off
-                        float ignition_prob = {{ source.fire_model.ignition_prob.prob | codegen_expr }};
-                        // clang-format on
-                        ignition_prob = clamp(ignition_prob, 0.0, 1.0);
-                        ignition_prob = 1.0 - std::powf(1.0 - ignition_prob, num_ember_recv[x, y]);
-
-                        if (sample_uniform(thread_state->rng) < ignition_prob) {
-                            thread_state->log_prob += std::logf(ignition_prob);
-
-                            float burn_time_mean = {{ source.fire_model.burn_time.dist.mean | codegen_expr }};
-                            float burn_time_std = {{ source.fire_model.burn_time.dist.std | codegen_expr }};
-                            float burn_time = sample_normal(thread_state->rng);
-                            thread_state->log_prob += normal_log_prob(burn_time);
-
-                            burn_time = burn_time * burn_time_mean + burn_time_std;
-                            burn_time = std::max<float>(0, burn_time);
-                            burn_time = std::roundf(burn_time);
-
-                            {{ source.tile_data.state_var.name | mangle }}[x, y] = Burning;
-                            change_time[x, y] = CUR_TICK + burn_time;
-                        } else {
-                            thread_state->log_prob += std::logf(1.0 - ignition_prob);
-                        }
-                    }
-                }
-            }
-            {{ tick_thread_phase_end("do_ignition") }}
-
-            // Do transition
-            {{ tick_thread_phase_begin("do_transition") }}
-            #pragma omp for collapse(2) schedule(guided)
-            for (std::int32_t x = 0; x < NUM_ROWS; x++) {
-                for (std::int32_t y = 0; y < NUM_COLS; y++) {
-                    if (change_time[x, y] == CUR_TICK) [[unlikely]] {
-                        {{ source.tile_data.state_var.name | mangle }}[x, y] = BurntOut;
-                        change_time[x, y] = -1;
-                    }
-                }
-            }
-            {{ tick_thread_phase_end("do_transition") }}
-
-            // Count states
-            {{ tick_thread_phase_begin("count_states") }}
-            #pragma omp for reduction(+:num_unburned_tick, num_burning_tick, num_burnt_out_tick) collapse(2) schedule(guided)
-            for (std::int32_t x = 0; x < NUM_ROWS; x++) {
-                for (std::int32_t y = 0; y < NUM_COLS; y++) {
-                    if ({{ source.tile_data.state_var.name | mangle }}[x, y] == Unburned) {
-                        num_unburned_tick++;
-                    } else if ({{ source.tile_data.state_var.name | mangle }}[x, y] == Burning) {
-                        num_burning_tick++;
-                    } else {
-                        num_burnt_out_tick++;
-                    }
-                }
-            }
-            {{ tick_thread_phase_end("count_states") }}
-
-        } // end parallel
-
-        num_unburned[CUR_TICK] = num_unburned_tick;
-        num_burning[CUR_TICK] = num_burning_tick;
-        num_burnt_out[CUR_TICK] = num_burning_tick;
-        num_ember_gen_sum[CUR_TICK] = num_ember_gen_sum_tick;
-        num_ember_recv_sum[CUR_TICK] = num_ember_recv_sum_tick;
-
-        write_output_start_time = Clock::now();
+        {{ proc_phase_begin("write_output") }}
 
         std::array<hsize_t, 3> slab_start = {hsize_t(CUR_TICK), 0, 0};
         std::array<hsize_t, 3> slab_count = {1, hsize_t(NUM_ROWS), hsize_t(NUM_COLS)};
@@ -775,21 +776,11 @@ static double main_loop(H5::H5File& file) {
         {% endif %}
         {% endfor %}
 
-        write_output_duration += Duration(Clock::now() - write_output_start_time).count();
+        {{ proc_phase_end("write_output") }}
     }
-
-    return write_output_duration;
 }
 
 int main(int argc, char *argv[]) {
-    {% macro proc_phase_begin(name) %}
-    auto {{ name }}_start_time = Clock::now();
-    {% endmacro %}
-
-    {% macro proc_phase_end(name) %}
-    double {{ name }}_duration = Duration(Clock::now() - {{ name }}_start_time).count();
-    {% endmacro %}
-
     {{ proc_phase_begin("prog") }}
 
     argparse::ArgumentParser program(argv[0]);
@@ -809,17 +800,11 @@ int main(int argc, char *argv[]) {
 
     // clang-format off
     {{ add_argument("-n", "--num-ticks", "Num ticks", "NUM_TICKS") }}
-
     {{ add_argument("-r", "--num-rows", "Num rows in tile data", "NUM_ROWS") }}
-
     {{ add_argument("-c", "--num-cols", "Num cols in tile data", "NUM_COLS") }}
-
     {{ add_argument("-t", "--tile-file", "Tile data file (HDF5).", "tile_file_name") }}
-
     {{ add_argument("-s", "--seed-file", "Seed data file (HDF5).", "seed_file_name") }}
-
     {{ add_argument("-w", "--tick-file", "Tick data file (Parquet).", "tick_file_name") }}
-
     {{ add_argument("-o", "--output-file", "Output file (HDF5).", "output_file_name") }}
 
     {% for cfg in source.configs %}
@@ -853,69 +838,32 @@ int main(int argc, char *argv[]) {
 
     double total_alloc_bytes = 0.0;
 
-    {% macro alloc_tick_var_mem(name, type) %}
+    {% for name, type in tick_vars %}
     auto {{ name }}_count = NUM_TICKS;
     {{ type }}* {{ name }}_mem = new {{ type  }}[{{ name }}_count];
     auto {{ name  }}_free = stdex::scope_exit([=]() { delete[] {{ name }}_mem; });
     {{ name }} = stdex::mdspan({{ name }}_mem, NUM_TICKS);
     total_alloc_bytes += {{ name }}_count * sizeof({{ type }});
-    {% endmacro %}
 
-    {% macro alloc_tile_var_mem(name, type) %}
+    {% endfor %}
+
+    {% for name, type in tile_vars %}
     auto {{ name }}_count = NUM_ROWS * NUM_COLS;
     {{ type }}* {{ name }}_mem = new {{ type  }}[{{ name }}_count];
     auto {{ name  }}_free = stdex::scope_exit([=]() { delete[] {{ name }}_mem; });
     {{ name }} = stdex::mdspan({{ name }}_mem, NUM_ROWS, NUM_COLS);
     total_alloc_bytes +=  {{ name }}_count * sizeof({{ type }});
-    {% endmacro %}
 
-    {% macro alloc_jump_var_mem(name, type) %}
+    {% endfor %}
+
+    {% for name, type in jump_vars %}
     auto {{ name }}_count = NUM_ROWS * NUM_COLS * (2 * MAX_JUMP_X + 1) * (2 * MAX_JUMP_Y + 1);
     {{ type }}* {{ name }}_mem = new {{ type  }}[{{ name }}_count];
     auto {{ name  }}_free = stdex::scope_exit([=]() { delete[] {{ name }}_mem; });
     {{ name }} = stdex::mdspan({{ name }}_mem, NUM_ROWS, NUM_COLS, 2 * MAX_JUMP_X + 1, 2 * MAX_JUMP_Y + 1);
     total_alloc_bytes +=  {{ name }}_count * sizeof({{ type }});
-    {% endmacro %}
 
-    {% for var in source.tick_data.tick_vars %}
-    {% if var.is_real %}
-    {{ alloc_tick_var_mem(var.name | mangle, var.type.name | cpp_type) }}
-
-    {% endif %}
     {% endfor %}
-
-    {% for var in source.tile_data.tile_vars %}
-    {% if var.is_real %}
-    {{ alloc_tile_var_mem(var.name | mangle, var.type.name | cpp_type) }}
-
-    {% endif %}
-    {% endfor %}
-
-    {{ alloc_tile_var_mem("change_time", "std::int32_t") }}
-
-    {{ alloc_tile_var_mem("num_ember_gen", "std::int32_t") }}
-
-    {{ alloc_tile_var_mem("num_ember_recv", "std::int32_t") }}
-
-    {{ alloc_jump_var_mem("jump_like", "float") }}
-
-    {{ alloc_jump_var_mem("jump_alias_index", "std::int32_t",) }}
-
-    {{ alloc_jump_var_mem("jump_alias_prob", "float") }}
-
-    {{ alloc_jump_var_mem("jump_alias_small_q", "std::int32_t") }}
-
-    {{ alloc_jump_var_mem("jump_alias_large_q", "std::int32_t") }}
-
-    {{ alloc_tick_var_mem("num_unburned", "std::int32_t") }}
-
-    {{ alloc_tick_var_mem("num_burning", "std::int32_t") }}
-
-    {{ alloc_tick_var_mem("num_burnt_out", "std::int32_t") }}
-
-    {{ alloc_tick_var_mem("num_ember_gen_sum", "std::int32_t") }}
-
-    {{ alloc_tick_var_mem("num_ember_recv_sum", "std::int32_t") }}
 
     std::random_device rnd_device;
     auto seed = rnd_device();
@@ -926,18 +874,13 @@ int main(int argc, char *argv[]) {
         thread_state->rng = RngEngine({ {seed, unsigned(omp_get_thread_num())} });
         thread_state->log_prob = 0.0;
 
-        {% macro alloc_tick_thread_duration(name) %}
-        thread_state->{{ name }}_duration.resize(NUM_TICKS, -1.0);
+        {% for name in tick_thread_phase_vars %}
+        thread_state->{{ name }}_start_time.resize(NUM_TICKS, Clock::now());
+        thread_state->{{ name }}_duration.resize(NUM_TICKS, 0.0);
+        total_alloc_bytes +=  NUM_TICKS * sizeof(Clock::time_point);
         total_alloc_bytes +=  NUM_TICKS * sizeof(double);
-        {% endmacro %}
 
-        {{ alloc_tick_thread_duration("reset_for_tick") }}
-        {{ alloc_tick_thread_duration("create_embers") }}
-        {{ alloc_tick_thread_duration("compute_jump_dist") }}
-        {{ alloc_tick_thread_duration("assign_embers") }}
-        {{ alloc_tick_thread_duration("do_ignition") }}
-        {{ alloc_tick_thread_duration("do_transition") }}
-        {{ alloc_tick_thread_duration("count_states") }}
+        {% endfor %}
     }
     auto thread_state_free = stdex::scope_exit([=]() {
         #pragma omp parallel
@@ -961,13 +904,13 @@ int main(int argc, char *argv[]) {
     }
     {{ proc_phase_end("read_input") }}
 
-    seed_change_time();
+    init_change_time();
     {{ proc_phase_end("init") }}
 
     H5::H5File output_file(output_file_name, H5F_ACC_CREAT | H5F_ACC_RDWR);
 
     {{ proc_phase_begin("main") }}
-    double write_output_duration = main_loop(output_file);
+    main_loop(output_file);
     {{ proc_phase_end("main") }}
 
     {% macro save_tick_stat(name, h5_type) %}
@@ -1011,22 +954,16 @@ int main(int argc, char *argv[]) {
     {{ save_run_stat("total_alloc_bytes", "total_alloc_bytes", "H5::PredType::NATIVE_DOUBLE") }}
     {{ save_run_stat("log_prob", "log_prob", "H5::PredType::NATIVE_DOUBLE") }}
 
-    {% macro save_proc_duration(name) %}
+    {% for name in proc_phase_vars %}
     {
         auto dataspace = H5::DataSpace(H5S_SCALAR);
         auto datatype = H5::PredType::NATIVE_DOUBLE;
         auto attribute = runstats.createAttribute("{{ name }}_duration", datatype, dataspace);
         attribute.write(datatype, &{{ name }}_duration);
     }
-    {% endmacro %}
+    {% endfor %}
 
-    {{ save_proc_duration("prog") }}
-    {{ save_proc_duration("init") }}
-    {{ save_proc_duration("read_input") }}
-    {{ save_proc_duration("write_output") }}
-    {{ save_proc_duration("main") }}
-
-    {% macro save_tick_thread_duration(name) %}
+    {% for name in tick_thread_phase_vars %}
     {
         std::array<hsize_t, 2> full_dims = {hsize_t(omp_get_max_threads()), hsize_t(NUM_TICKS)};
         auto file_space = H5::DataSpace(full_dims.size(), full_dims.data());
@@ -1043,15 +980,8 @@ int main(int argc, char *argv[]) {
             dataset.write(thread_state->{{ name }}_duration.data(), datatype, mem_space, file_space);
         }
     }
-    {% endmacro %}
 
-    {{ save_tick_thread_duration("reset_for_tick") }}
-    {{ save_tick_thread_duration("create_embers") }}
-    {{ save_tick_thread_duration("compute_jump_dist") }}
-    {{ save_tick_thread_duration("assign_embers") }}
-    {{ save_tick_thread_duration("do_ignition") }}
-    {{ save_tick_thread_duration("do_transition") }}
-    {{ save_tick_thread_duration("count_states") }}
+    {% endfor %}
 
     return 0;
 }
