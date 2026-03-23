@@ -1,0 +1,1277 @@
+{#- name: "assignment_stmt" -#}
+#line {{ pos.line }} "{{ pos.file }}"
+{{ lvalue }} = {{ rvalue }} ;
+#endline
+
+{#- name: "update_stmt" -#}
+#line {{ pos.line }} "{{ pos.file }}"
+{{ lvalue }} {{ op }} {{ rvalue }} ;
+#endline
+
+{#- name: "return_stmt" -#}
+#line {{ pos.line }} "{{ pos.file }}"
+{% if arg %}
+return {{ arg }} ;
+{% else %}
+return ;
+{% endif %}
+#endline
+
+{#- name: "else_section" -#}
+#line {{ pos.line }} "{{ pos.file }}"
+else {
+    {% for stmt in stmts %}
+    {{ stmt | indent }}
+    {% endfor %}
+}
+#endline
+
+{#- name: "elif_section" -#}
+#line {{ pos.line }} "{{ pos.file }}"
+else if ({{ condition }}) {
+    {% for stmt in stmts %}
+    {{ stmt | indent }}
+    {% endfor %}
+}
+#endline
+
+{#- name: "if_stmt" -#}
+#line {{ pos.line }} "{{ pos.file }}"
+if ({{ condition }}) {
+    {% for stmt in stmts %}
+    {{ stmt | indent }}
+    {% endfor %}
+}
+{% for elif in elifs %}
+{{ elif }}
+{% endfor %}
+{{ else_ }}
+#endline
+
+{#- name: "func_decl" -#}
+static inline {{ rtype }} {{ name }}( {{ ptypes | join(", ") }} ) ;
+
+{#- name: "func_defn" -#}
+#line {{ pos.line }} "{{ pos.file }}"
+static {{ rtype }} {{ name }}( {{ params |  join(", ") }}) {
+    {% for var, type, init in lvars %}
+    {{ type }} {{ var }} = {{ init }} ;
+    {% endfor %}
+
+    {% for stmt in stmts %}
+    {{ stmt | indent }}
+    {% endfor %}
+}
+#endline
+
+{#- name: "simulator.cpp" -#}
+#include <cmath>
+#include <cstdint>
+#include <random>
+#include <numbers>
+#include <chrono>
+#include <span>
+#include <experimental/mdspan>
+#include <experimental/scope>
+
+#include <omp.h>
+#include <upcxx/upcxx.hpp>
+
+#include <fmt/format.h>
+#include <argparse/argparse.hpp>
+#include <Random123/philox.h>
+#include <Random123/conventional/Engine.hpp>
+#include <H5Cpp.h>
+#include <arrow/array.h>
+#include <arrow/io/api.h>
+#include <arrow/record_batch.h>
+#include <parquet/arrow/reader.h>
+
+namespace stdex = std::experimental;
+using Clock = std::chrono::high_resolution_clock;
+using Duration = std::chrono::duration<double>;
+
+struct Position {
+    std::int32_t x;
+    std::int32_t y;
+};
+
+using fire_state_t = std::int8_t;
+constexpr fire_state_t Unburned = 0;
+constexpr fire_state_t Burning = 1;
+constexpr fire_state_t BurntOut = 2;
+
+using Rng = r123::Philox4x32;
+using RngEngine = r123::Engine<Rng>;
+
+using tile_extents_t = stdex::dextents<std::int32_t, 2>;
+using jump_extents_t = stdex::dextents<std::int32_t, 4>;
+
+static inline float distance(Position a, Position b) {
+    return std::hypotf(a.x - b.x, a.y - b.y);
+}
+
+static inline float alignment(Position a, Position b, float direction) {
+    float dx = b.x - a.x;
+    float dy = -(b.y - a.y);
+
+    float d_abs = std::hypotf(dx, dy);
+
+    float wx = std::sinf(direction / 360.0);
+    float wy = std::cosf(direction / 360.0);
+
+    return (dx * wx + dy * wy) / d_abs;
+}
+
+static inline float clamp(float x, float xmin, float xmax) {
+    if (x < xmin) {
+        x = xmin;
+    }
+    if (x > xmax) {
+        x = xmax;
+    }
+    return x;
+}
+
+
+static inline std::int32_t sample_discrete(RngEngine& rng, std::int32_t a, std::int32_t b) {
+    std::uniform_int_distribution<std::int32_t> dist(a, b);
+    return dist(rng);
+}
+
+static inline float sample_uniform(RngEngine& rng) {
+    std::uniform_real_distribution<float> dist(0.0, 1.0);
+    return dist(rng);
+}
+
+static inline float sample_normal(RngEngine& rng) {
+    std::normal_distribution<float> dist(0.0, 1.0);
+    return dist(rng);
+}
+
+
+static inline float normal_log_prob(float x) {
+    return -(x * x + std::logf(std::numbers::pi) + std::logf(2.0)) / 2.0;
+}
+
+static inline std::int32_t sample_poisson(RngEngine& rng, float rate) {
+    std::poisson_distribution<std::int32_t> dist(rate);
+    return dist(rng);
+}
+
+static inline float poisson_log_prob(std::int32_t x, float rate) {
+    return x * std::logf(rate) - rate - std::lgammaf(x + 1);
+}
+
+{% set proc_phase_vars = ["prog", "init", "read_input", "write_output", "main"] %}
+{% for name in proc_phase_vars %}
+static Clock::time_point {{ name }}_start_time{};
+static double {{ name }}_duration = 0;
+
+{% endfor %}
+
+{% macro proc_phase_begin(name) %}
+{{ name }}_start_time = Clock::now();
+{% endmacro %}
+
+{% macro proc_phase_end(name) %}
+{{ name }}_duration += Duration(Clock::now() - {{ name }}_start_time).count();
+{% endmacro %}
+
+{%
+    set tick_thread_phase_vars = [
+        "reset_for_tick",
+        "create_embers",
+        "compute_jump_dist",
+        "assign_embers",
+        "do_ignition",
+        "do_transition",
+        "count_states"
+    ]
+%}
+
+struct alignas(std::hardware_constructive_interference_size) ThreadState {
+    RngEngine rng;
+    double log_prob;
+
+    {% for var in tick_thread_phase_vars %}
+    std::vector<Clock::time_point> {{ var }}_start_time;
+    std::vector<double> {{ var }}_duration;
+
+    {% endfor %}
+};
+
+ThreadState* thread_state = nullptr;
+#pragma omp threadprivate (thread_state)
+
+{% macro tick_thread_phase_begin(name) %}
+thread_state->{{ name }}_start_time[CUR_TICK] = Clock::now();
+{% endmacro %}
+
+{% macro tick_thread_phase_end(name) %}
+thread_state->{{ name }}_duration[CUR_TICK] += Duration(Clock::now() - thread_state->{{ name }}_start_time[CUR_TICK]).count();
+{% endmacro %}
+
+{% for opt in source.options %}
+constexpr std::int32_t {{ opt.name | upper }} = {{ opt.value }};
+{% endfor %}
+
+static std::int32_t NUM_TICKS = 0;
+static std::int32_t CUR_TICK = 0;
+
+// Full
+static std::int32_t NUM_ROWS = 0;
+static std::int32_t NUM_COLS = 0;
+
+// Local: Region we keep in memory
+// Includes internal + halo regions
+static std::int32_t NUM_ROWS_LOCAL = 0;
+static std::int32_t NUM_COLS_LOCAL = 0;
+static std::int32_t ROW_BEGIN_LOCAL = 0;
+static std::int32_t ROW_END_LOCAL = 0;
+static std::int32_t COL_BEGIN_LOCAL = 0;
+static std::int32_t COL_END_LOCAL = 0;
+
+// Internal: Region we have ownership over
+static std::int32_t NUM_ROWS_INTERNAL = 0;
+static std::int32_t NUM_COLS_INTERNAL = 0;
+static std::int32_t ROW_BEGIN_INTERNAL = 0;
+static std::int32_t ROW_END_INTERNAL = 0;
+static std::int32_t COL_BEGIN_INTERNAL = 0;
+static std::int32_t COL_END_INTERNAL = 0;
+
+// Left: Left internal region
+static std::int32_t NUM_ROWS_LEFT = 0;
+static std::int32_t NUM_COLS_LEFT = 0;
+static std::int32_t ROW_BEGIN_LEFT = 0;
+static std::int32_t ROW_END_LEFT = 0;
+static std::int32_t COL_BEGIN_LEFT = 0;
+static std::int32_t COL_END_LEFT = 0;
+
+// Right: Right internal region
+static std::int32_t NUM_ROWS_RIGHT = 0;
+static std::int32_t NUM_COLS_RIGHT = 0;
+static std::int32_t ROW_BEGIN_RIGHT = 0;
+static std::int32_t ROW_END_RIGHT = 0;
+static std::int32_t COL_BEGIN_RIGHT = 0;
+static std::int32_t COL_END_RIGHT = 0;
+
+static inline Position to_local_index(Position pos) {
+    return Position{
+        .x = pos.x - ROW_BEGIN_LOCAL,
+        .y = pos.y - COL_BEGIN_LOCAL
+    };
+}
+
+static inline bool is_local_position(Position pos) {
+    return (
+        pos.x >= ROW_BEGIN_LOCAL &&
+        pos.x < ROW_END_LOCAL &&
+        pos.y >= COL_BEGIN_LOCAL &&
+        pos.y < COL_END_LOCAL
+    );
+}
+
+static inline bool is_internal_position(Position pos) {
+    return (
+        pos.x >= ROW_BEGIN_INTERNAL &&
+        pos.x < ROW_END_INTERNAL &&
+        pos.y >= COL_BEGIN_INTERNAL &&
+        pos.y < COL_END_INTERNAL
+    );
+}
+
+static inline bool is_left_position(Position pos) {
+    return (
+        pos.x >= ROW_BEGIN_LEFT &&
+        pos.x < ROW_END_LEFT &&
+        pos.y >= COL_BEGIN_LEFT &&
+        pos.y < COL_END_LEFT
+    );
+}
+
+static inline bool is_right_position(Position pos) {
+    return (
+        pos.x >= ROW_BEGIN_RIGHT &&
+        pos.x < ROW_END_RIGHT &&
+        pos.y >= COL_BEGIN_RIGHT &&
+        pos.y < COL_END_RIGHT
+    );
+}
+
+{% for cfg in source.configs %}
+static {{ cfg.type.name | cpp_type_config }} {{ cfg.name | mangle }} = {{ cfg.type.name | cpp_init }};
+{% endfor %}
+
+{% set tick_vars = [
+    ("num_unburned", "std::int32_t"),
+    ("num_burning", "std::int32_t"),
+    ("num_burnt_out", "std::int32_t"),
+    ("num_ember_gen_sum", "std::int32_t"),
+    ("num_ember_recv_sum", "std::int32_t"),
+] %}
+
+{% for var in source.tick_data.tick_vars %}
+{% if var.is_real %}
+{% do tick_vars.append((var.name | mangle, var.type.name | cpp_type)) %}
+{% endif %}
+{% endfor %}
+
+{% for name, type in tick_vars %}
+static std::span<{{ type }}> {{ name }};
+{% endfor %}
+
+{%
+    set tile_vars = [
+        ("change_time", "std::int32_t"),
+        ("num_ember_gen", "std::int32_t"),
+        ("num_ember_recv", "std::int32_t")
+    ]
+%}
+
+{% for var in source.tile_data.tile_vars %}
+{% if var.is_real %}
+{% do tile_vars.append((var.name | mangle, var.type.name | cpp_type)) %}
+{% endif %}
+{% endfor %}
+
+{% for name, type in tile_vars %}
+static stdex::mdspan<{{ type }}, tile_extents_t> {{ name }};
+{% endfor %}
+
+{%
+    set message_vars = [
+        ("num_ember_recv", "std::int32_t"),
+    ]
+%}
+
+{% for name, type in message_vars %}
+struct {{ name }}_message {
+    std::int32_t x;
+    std::int32_t y;
+    {{ type }} name;
+};
+
+{% endfor %}
+
+{% for name, _ in message_vars %}
+static upcxx::global_ptr<std::byte> {{ name }}_left_send_mem;
+static upcxx::global_ptr<std::byte> {{ name }}_left_recv_mem;
+static upcxx::global_ptr<std::byte> {{ name }}_right_send_mem;
+static upcxx::global_ptr<std::byte> {{ name }}_right_recv_mem;
+
+static std::span<std::byte> {{ name }}_left_send_buf;
+static std::span<std::byte> {{ name }}_left_recv_buf;
+static std::span<std::byte> {{ name }}_right_send_buf;
+static std::span<std::byte> {{ name }}_right_recv_buf;
+
+static upcxx::global_ptr<std::byte> {{ name }}_left_send_addr;
+static upcxx::global_ptr<std::byte> {{ name }}_right_send_addr;
+
+{% endfor %}
+
+{%
+    set jump_vars = [
+        ("jump_like", "float"),
+        ("jump_alias_index", "std::int32_t"),
+        ("jump_alias_prob", "float"),
+        ("jump_alias_small_q", "std::int32_t"),
+        ("jump_alias_large_q", "std::int32_t"),
+    ]
+%}
+
+{% for name, type in jump_vars %}
+static stdex::mdspan<{{ type }}, jump_extents_t> {{ name }};
+{% endfor %}
+
+{% for fn_decl in fn_decls %}
+{{ fn_decl }}
+{% endfor %}
+
+{% for fn_defn in fn_defns %}
+{{ fn_defn }}
+
+{% endfor %}
+
+static void initialize_memory() {
+    {% for name, _ in tick_vars %}
+    #pragma omp simd
+    for (std::int32_t i = 0; i < {{ name }}.size(); i++) {
+	{{ name }}[i] = 0;
+    }
+
+    {% endfor %}
+
+    {% for name, _ in message_vars %}
+    #pragma omp simd
+    for (std::int32_t i = 0; i < {{ name }}.size() ; i++) {
+	{{ name }}[i] = 0;
+    }
+
+    {% endfor %}
+
+    #pragma omp parallel
+    {
+        {% for name, _ in tile_vars %}
+        #pragma omp for simd collapse(2) schedule(static) nowait
+        for (std::int32_t x = 0; x < NUM_ROWS_LOCAL; x++) {
+            for (std::int32_t y = 0; y < NUM_COLS_LOCAL; y++) {
+                {{ name }}[x, y] = 0;
+            }
+        }
+
+        {% endfor %}
+
+        {% for name, _ in jump_vars %}
+        #pragma omp for simd collapse(2) schedule(static) nowait
+        for (std::int32_t x = 0; x < NUM_ROWS_LOCAL; x++) {
+            for (std::int32_t y = 0; y < NUM_COLS_LOCAL; y++) {
+                for (std::int32_t idx = 0; idx < 2 * MAX_JUMP_X + 1; idx++) {
+                    for (std::int32_t idy = 0; idy < 2 * MAX_JUMP_Y + 1; idy++) {
+                        {{ name }}[x, y, idx, idy] = 0;
+                    }
+                }
+            }
+        }
+
+        {% endfor %}
+    }
+}
+
+static void load_tile_data(const std::string& file_name) {
+    H5::H5File file = H5::H5File(file_name, H5F_ACC_RDONLY);
+
+    std::array<hsize_t, 2> full_dims = {hsize_t(NUM_ROWS), hsize_t(NUM_COLS)};
+    auto file_space = H5::DataSpace(full_dims.size(), full_dims.data());
+
+    std::array<hsize_t, 2> slab_start = {hsize_t(ROW_BEGIN_LOCAL), hsize_t(COL_BEGIN_LOCAL)};
+    std::array<hsize_t, 2> slab_count = {hsize_t(NUM_ROWS_LOCAL), hsize_t(NUM_COLS_LOCAL)};
+    auto mem_space = H5::DataSpace(slab_count.size(), slab_count.data());
+    file_space.selectHyperslab(H5S_SELECT_SET, slab_count.data(), slab_start.data());
+
+    {% for var in source.tile_data.tile_vars %}
+    {% if var.is_real and not var.is_seeded %}
+    {
+
+        auto mem_type = {{ var.type.name | h5_type }};
+        auto dataset = file.openDataSet("{{ var.name }}");
+        dataset.read({{ var.name | mangle }}.data_handle(), mem_type, mem_space, file_space);
+    }
+
+    {% endif %}
+    {% endfor %}
+}
+
+static void load_seed_data(const std::string& file_name) {
+    H5::H5File file = H5::H5File(file_name, H5F_ACC_RDONLY);
+
+    std::array<hsize_t, 2> full_dims = {hsize_t(NUM_ROWS), hsize_t(NUM_COLS)};
+    auto file_space = H5::DataSpace(full_dims.size(), full_dims.data());
+
+    std::array<hsize_t, 2> slab_start = {hsize_t(ROW_BEGIN_LOCAL), hsize_t(COL_BEGIN_LOCAL)};
+    std::array<hsize_t, 2> slab_count = {hsize_t(NUM_ROWS_LOCAL), hsize_t(NUM_COLS_LOCAL)};
+    auto mem_space = H5::DataSpace(slab_count.size(), slab_count.data());
+    file_space.selectHyperslab(H5S_SELECT_SET, slab_count.data(), slab_start.data());
+
+    {% for var in source.tile_data.tile_vars %}
+    {% if var.is_real and var.is_seeded %}
+    {
+        auto mem_type = {{ var.type.name | h5_type }};
+        auto dataset = file.openDataSet("{{ var.name }}");
+        dataset.read({{ var.name | mangle }}.data_handle(), mem_type, mem_space, file_space);
+    }
+
+    {% endif %}
+    {% endfor %}
+}
+
+static void init_change_time() {
+    #pragma omp parallel
+    {
+        #pragma omp for collapse(2) schedule(guided)
+        for (std::int32_t x = ROW_BEGIN_INTERNAL; x < ROW_END_INTERNAL; x++) {
+            for (std::int32_t y = COL_BEGIN_INTERNAL; y < COL_END_INTERNAL; y++) {
+                auto [ix, iy] = to_local_index({x, y)}
+                if ({{ source.tile_data.state_var.name | mangle }}[ix, iy] == Burning) {
+                    float burn_time_mean = {{ source.fire_model.burn_time.dist.mean | codegen_expr }};
+                    float burn_time_std = {{ source.fire_model.burn_time.dist.std | codegen_expr }};
+                    float burn_time = sample_normal(thread_state->rng);
+                    thread_state->log_prob += normal_log_prob(burn_time);
+
+                    burn_time = burn_time * burn_time_mean + burn_time_std;
+                    burn_time = std::max<float>(0, burn_time);
+                    burn_time = std::roundf(burn_time);
+
+                    change_time[ix, iy] = burn_time;
+                } else {
+                    change_time[ix, iy] = -1;
+                }
+            }
+        }
+    }
+}
+
+static arrow::Status load_tick_data(const std::string& file_name) {
+    arrow::MemoryPool* pool = arrow::default_memory_pool();
+
+    auto reader_properties = parquet::ReaderProperties(pool);
+    reader_properties.set_buffer_size(64 * 1025 * 1024);
+    reader_properties.enable_buffered_stream();
+
+    auto arrow_reader_props = parquet::ArrowReaderProperties();
+    arrow_reader_props.set_batch_size(1024 * 1024);
+
+    parquet::arrow::FileReaderBuilder reader_builder;
+    ARROW_RETURN_NOT_OK(reader_builder.OpenFile(file_name, /*memory_map=*/false, reader_properties));
+    reader_builder.memory_pool(pool);
+    reader_builder.properties(arrow_reader_props);
+
+    std::unique_ptr<parquet::arrow::FileReader> arrow_reader;
+    ARROW_ASSIGN_OR_RAISE(arrow_reader, reader_builder.Build());
+
+    std::shared_ptr<::arrow::RecordBatchReader> rb_reader;
+    ARROW_ASSIGN_OR_RAISE(rb_reader, arrow_reader->GetRecordBatchReader());
+
+    for (auto&& maybe_batch : *rb_reader) {
+	std::shared_ptr<arrow::RecordBatch> batch;
+	ARROW_ASSIGN_OR_RAISE(batch, maybe_batch);
+	auto num_rows = batch->num_rows();
+
+        {% for var in source.tick_data.tick_vars %}
+        auto {{ var.name | mangle }}_type = {{ var.type.name | arrow_type }};
+        auto {{ var.name | mangle }}_arr = batch->GetColumnByName("{{ var.name }}");
+        if (!{{ var.name | mangle }}_arr) {
+            throw std::runtime_error("Column '{{ var.name }}' not found");
+        }
+        if (!{{ var.name | mangle }}_arr->type()->Equals({{ var.name | mangle }}_type)) {
+            throw std::runtime_error(fmt::format("Column '{{ var.name }}' of unexpected type: expected = {}, got = {}",
+                {{ var.name | mangle }}_type->ToString(), {{ var.name | mangle }}_arr->type()->ToString()));
+        }
+        auto {{ var.name | mangle }}_col = std::dynamic_pointer_cast<{{ var.type.name | arrow_array_type }}>({{ var.name | mangle }}_arr);
+
+        {% endfor %}
+
+        for (std::int32_t i = 0; i < num_rows; i++) {
+            if ({{ source.tick_data.key_var.name | mangle }}_col->IsValid(i)) {
+                std::int32_t tick = {{ source.tick_data.key_var.name | mangle }}_col->Value(i);
+                if (tick >= 0 && tick < NUM_TICKS) {
+                    {% for var in source.tick_data.tick_vars %}
+                    {% if var.is_real %}
+                    if ({{ var.name | mangle }}_col->IsValid(i)) {
+                        {{ var.name | mangle }}[tick] = {{ var.name | mangle }}_col->Value(i);
+                    }
+                    {% endif %}
+                    {% endfor %}
+                }
+            }
+        }
+    }
+
+    return arrow::Status::OK();
+}
+
+static void prepare_alias_table(std::int32_t x, std::int32_t y) {
+    std::int32_t n_elems = (2 * MAX_JUMP_X + 1) * (2 * MAX_JUMP_Y + 1);
+    auto likelihood = stdex::mdspan(&jump_like[x, y, 0, 0], n_elems);
+    auto alias_index = stdex::mdspan(&jump_alias_index[x, y, 0, 0], n_elems);
+    auto alias_prob = stdex::mdspan(&jump_alias_prob[x, y, 0, 0], n_elems);
+    auto small_q = stdex::mdspan(&jump_alias_small_q[x, y, 0, 0], n_elems);
+    auto large_q = stdex::mdspan(&jump_alias_large_q[x, y, 0, 0], n_elems);
+
+    std::int32_t small_q_head = 0;
+    std::int32_t large_q_head = 0;
+
+    double lhsum = 0;
+    for (std::int32_t i = 0; i < n_elems; i++) {
+        lhsum += likelihood[i];
+    }
+
+    // Everything is too close to zero
+    if (lhsum < std::numeric_limits<double>::epsilon()) {
+	for (std::int32_t i = 0; i < n_elems; i++) {
+	    alias_prob[i] = 1.0;
+            likelihood[i] = std::logf(1.0 / n_elems);
+	}
+	return;
+    }
+
+    for (std::int32_t i = 0; i < n_elems; i++) {
+        likelihood[i] /= lhsum;
+        alias_prob[i] = likelihood[i] * n_elems;
+        likelihood[i] = std::logf(likelihood[i]);
+        if (alias_prob[i] < 1.0) {
+            small_q[small_q_head++] = i;
+        } else {
+            large_q[large_q_head++] = i;
+        }
+    }
+
+    while (small_q_head > 0 && large_q_head > 0) {
+        auto s = small_q[--small_q_head];
+        auto l = large_q[--large_q_head];
+
+        alias_index[s] = l;
+        alias_prob[l] = alias_prob[l] + alias_prob[s] - 1.0;
+
+        if (alias_prob[l] < 1.0) {
+            small_q[small_q_head++] = l;
+        } else {
+            large_q[large_q_head++] = l;
+        }
+    }
+
+    while (large_q_head > 0) {
+        auto l = large_q[--large_q_head];
+        alias_prob[l] = 1.0;
+    }
+
+    while (small_q_head > 0) {
+        auto s = small_q[--small_q_head];
+        alias_prob[s] = 1.0;
+    }
+}
+
+static std::pair<std::int32_t, std::int32_t> sample_alias_table(std::int32_t x, std::int32_t y, RngEngine& rng) {
+    std::int32_t n_elems = (2 * MAX_JUMP_X + 1) * (2 * MAX_JUMP_Y + 1);
+    auto alias_index = stdex::mdspan(&jump_alias_index[x, y, 0, 0], n_elems);
+    auto alias_prob = stdex::mdspan(&jump_alias_prob[x, y, 0, 0], n_elems);
+
+    std::int32_t i = sample_discrete(rng, 0, n_elems - 1);
+    float p = sample_uniform(rng);
+
+    std::int32_t samp = 0;
+    if (p < alias_prob[i]) {
+        samp = i;
+    } else {
+        samp = alias_index[i];
+    }
+
+    std::int32_t idx = samp / (2 * MAX_JUMP_Y + 1);
+    std::int32_t idy = samp % (2 * MAX_JUMP_Y + 1);
+    return std::make_pair(idx, idy);
+}
+
+// After prepare_table is called, jump_like contains the log probs
+static inline float alias_table_log_prob(std::int32_t idx, std::int32_t idy, std::int32_t x, std::int32_t y) {
+    return jump_like[x, y, idx, idy];
+}
+
+static void execute_tick() {
+    fmt::println("tick = {}", CUR_TICK);
+
+    std::int32_t num_unburned_tick = 0;
+    std::int32_t num_burning_tick = 0;
+    std::int32_t num_burnt_out_tick = 0;
+    std::int32_t num_ember_gen_sum_tick = 0;
+    std::int32_t num_ember_recv_sum_tick = 0;
+
+    #pragma omp parallel
+    {
+        // Reset for tick
+        {{ tick_thread_phase_begin("reset_for_tick") }}
+
+        {% set tile_vars_to_reset = ["num_ember_gen", "num_ember_recv"] %}
+        {% for name in tile_vars_to_reset %}
+        #pragma omp for simd collapse(2) schedule(static) nowait
+        for (std::int32_t xi = 0; xi < {{ name }}.extent(0); xi++) {
+            for (std::int32_t yi = 0; yi < {{ name }}.extent(1); yi++) {
+                {{ name }}[xi, yi] = 0;
+            }
+        }
+
+        {% endfor %}
+
+        {% set jump_vars_to_reset = [
+                "jump_like",
+                "jump_alias_index",
+                "jump_alias_prob",
+                "jump_alias_small_q",
+                "jump_alias_large_q"
+            ]
+        %}
+        {% for name in jump_vars_to_reset %}
+        #pragma omp for simd collapse(2) schedule(static) nowait
+        for (std::int32_t xi = 0; xi < {{ name }}.extent(0); xi++) {
+            for (std::int32_t yi = 0; yi < {{ name }}.extent(1); yi++) {
+                for (std::int32_t dxi = 0; dxi < {{ name }}.extent(2); dxi++) {
+                    for (std::int32_t dyi = 0; dyi < {{ name }}.extent(3); dyi++) {
+                        {{ name }}[xi, yi, dxi, dyi] = 0;
+                    }
+                }
+            }
+        }
+
+        {% endfor %}
+
+        {{ tick_thread_phase_end("reset_for_tick") }}
+
+        // Create embers
+        {{ tick_thread_phase_begin("create_embers") }}
+        #pragma omp for reduction(+: num_ember_gen_sum_tick) collapse(2) schedule(guided)
+        for (std::int32_t x = ROW_BEGIN_INTERNAL; x < ROW_END_INTERNAL; x++) {
+            for (std::int32_t y = COL_BEGIN_INTERNAL; y < COL_END_INTERNAL; y++) {
+                auto [xi, yi] = to_local_index({x, y});
+
+                if ({{ source.tile_data.state_var.name | mangle }}[xi, yi] == Burning) [[unlikely]] {
+                    [[maybe_unused]] Position pos{x, y};
+
+                    // clang-format off
+                    float rate = {{ source.fire_model.create_embers.dist.mean | codegen_expr }};
+                    // clang-format on
+                    rate = std::max<float>(0.0, rate);
+
+                    if (rate > 0.0) {
+                        auto count = sample_poisson(thread_state->rng, rate);
+                        thread_state->log_prob += poisson_log_prob(count, rate);
+
+                        count = std::min(count, MAX_EMBER_COUNT);
+                        num_ember_gen[xi, yi] = count;
+                        num_ember_gen_sum_tick += count;
+                    }
+                }
+            }
+        }
+        {{ tick_thread_phase_end("create_embers") }}
+
+        // Compute jump dist
+        {{ tick_thread_phase_begin("compute_jump_dist") }}
+        #pragma omp for collapse(2) schedule(guided)
+        for (std::int32_t sx = ROW_BEGIN_INTERNAL; sx < ROW_END_INTERNAL; sx++) {
+            for (std::int32_t sy = COL_BEGIN_INTERNAL; sy < COL_END_INTERNAL; sy++) {
+                auto [sxi, syi] = to_local_index({sx, sy});
+
+                if (num_ember_gen[sxi, syi] > 0) [[unlikely]] {
+                    for (std::int32_t del_xi = 0; del_xi < 2 * MAX_JUMP_X + 1; del_xi++) {
+                        for (std::int32_t del_yi = 0; del_yi < 2 * MAX_JUMP_Y + 1; del_yi++) {
+                            std::int32_t del_x = del_xi - MAX_JUMP_X;
+                            std::int32_t del_y = del_yi - MAX_JUMP_Y;
+
+                            std::int32_t dx = sx + del_x;
+                            std::int32_t dy = sy + del_y;
+                            if (is_local_position(dx, dy)) {
+                                [[maybe_unused]] Position src_pos{sx, sy};
+                                [[maybe_unused]] Position dst_pos{dx, dy};
+
+                                // clang-format off
+                                float likelihood = {{ source.fire_model.ember_jump_likelihood.like | codegen_expr }};
+                                // clang-format on
+                                likelihood = std::max<float>(0.0, likelihood);
+
+                                jump_like[sxi, syi, del_xi, del_yi] = likelihood;
+                            }
+                        }
+                    }
+
+                    prepare_alias_table(sxi, syi);
+                }
+            }
+        }
+        {{ tick_thread_phase_end("compute_jump_dist") }}
+
+        // Assign embers to receivers
+        {{ tick_thread_phase_begin("assign_embers") }}
+        #pragma omp for reduction(+: num_ember_recv_sum_tick) collapse(2) schedule(guided)
+        for (std::int32_t sx = ROW_BEGIN_INTERNAL; sx < ROW_END_INTERNAL; sx++) {
+            for (std::int32_t sy = COL_BEGIN_INTERNAL; sy < COL_BEGIN_INTERNAL; sy++) {
+                auto [sxi, syi] = to_local_index({sx, sy});
+
+                if (num_ember_gen[sxi, syi] > 0) [[unlikely]] {
+                    for (std::int32_t ei = 0; ei < num_ember_gen[sxi, syi]; ei++) {
+                        auto [del_xi, del_yi] = sample_alias_table(sxi, syi, thread_state->rng);
+                        std::int32_t del_x = del_xi - MAX_JUMP_X;
+                        std::int32_t del_y = del_yi - MAX_JUMP_Y;
+
+                        thread_state->log_prob += alias_table_log_prob(del_xi, del_yi, sxi, syi);
+
+                        std::int32_t dx = sx + del_x;
+                        std::int32_t dy = sy + del_y;
+                        if (is_local_position(dx, dy)) {
+                            [[maybe_unused]] Position src_pos{sx, sy};
+                            [[maybe_unused]] Position dst_pos{dx, dy};
+
+                            // clang-format off
+                            float death_prob = {{ source.fire_model.ember_death_prob.prob | codegen_expr }};
+                            // clang-format on
+                            death_prob = clamp(death_prob, 0.0, 1.0);
+
+                            if (sample_uniform(thread_state->rng) < 1.0 - death_prob) {
+                                auto [dxi, dyi] = to_local_index({dx, dy});
+
+                                #pragma omp atomic update
+                                num_ember_recv[dxi, dyi] += 1;
+
+                                num_ember_recv_sum_tick += 1;
+                                thread_state->log_prob += std::logf(1.0 - death_prob);
+                            } else {
+                                thread_state->log_prob += std::logf(death_prob);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        {{ tick_thread_phase_end("assign_embers") }}
+
+        // Do ignition
+        {{ tick_thread_phase_begin("do_ignition") }}
+        #pragma omp for collapse(2) schedule(guided)
+        for (std::int32_t x = ROW_BEGIN_INTERNAL; x < ROW_END_INTERNAL; x++) {
+            for (std::int32_t y = COL_BEGIN_INTERNAL; y < COL_END_INTERNAL; y++) {
+                auto [xi, yi] = to_local_index({x, y});
+
+                if ({{ source.tile_data.state_var.name | mangle }}[xi, yi] == Unburned && num_ember_recv[xi, yi] > 0) [[unlikely]] {
+                    [[maybe_unused]] Position pos{x, y};
+
+                    // clang-format off
+                    float ignition_prob = {{ source.fire_model.ignition_prob.prob | codegen_expr }};
+                    // clang-format on
+                    ignition_prob = clamp(ignition_prob, 0.0, 1.0);
+                    ignition_prob = 1.0 - std::powf(1.0 - ignition_prob, num_ember_recv[xi, yi]);
+
+                    if (sample_uniform(thread_state->rng) < ignition_prob) {
+                        thread_state->log_prob += std::logf(ignition_prob);
+
+                        float burn_time_mean = {{ source.fire_model.burn_time.dist.mean | codegen_expr }};
+                        float burn_time_std = {{ source.fire_model.burn_time.dist.std | codegen_expr }};
+                        float burn_time = sample_normal(thread_state->rng);
+                        thread_state->log_prob += normal_log_prob(burn_time);
+
+                        burn_time = burn_time * burn_time_mean + burn_time_std;
+                        burn_time = std::max<float>(0, burn_time);
+                        burn_time = std::roundf(burn_time);
+
+                        {{ source.tile_data.state_var.name | mangle }}[xi, yi] = Burning;
+                        change_time[xi, yi] = CUR_TICK + burn_time;
+                    } else {
+                        thread_state->log_prob += std::logf(1.0 - ignition_prob);
+                    }
+                }
+            }
+        }
+        {{ tick_thread_phase_end("do_ignition") }}
+
+        // Do transition
+        {{ tick_thread_phase_begin("do_transition") }}
+        #pragma omp for collapse(2) schedule(guided)
+        for (std::int32_t x = ROW_BEGIN_INTERNAL; x < ROW_END_INTERNAL; x++) {
+            for (std::int32_t y = COL_BEGIN_INTERNAL; y < COL_END_INTERNAL; y++) {
+                auto [xi, yi] = to_local_index({x, y});
+
+                if (change_time[xi, yi] == CUR_TICK) [[unlikely]] {
+                    {{ source.tile_data.state_var.name | mangle }}[xi, yi] = BurntOut;
+                    change_time[xi, yi] = -1;
+                }
+            }
+        }
+        {{ tick_thread_phase_end("do_transition") }}
+
+        // Count states
+        {{ tick_thread_phase_begin("count_states") }}
+        #pragma omp for reduction(+:num_unburned_tick, num_burning_tick, num_burnt_out_tick) collapse(2) schedule(guided)
+        for (std::int32_t x = ROW_BEGIN_INTERNAL; x < ROW_END_INTERNAL; x++) {
+            for (std::int32_t y = COL_BEGIN_INTERNAL; y < COL_END_INTERNAL; y++) {
+                auto [xi, yi] = to_local_index({x, y});
+
+                if ({{ source.tile_data.state_var.name | mangle }}[xi, yi] == Unburned) {
+                    num_unburned_tick++;
+                } else if ({{ source.tile_data.state_var.name | mangle }}[xi, yi] == Burning) {
+                    num_burning_tick++;
+                } else {
+                    num_burnt_out_tick++;
+                }
+            }
+        }
+        {{ tick_thread_phase_end("count_states") }}
+
+    } // end parallel
+
+    num_unburned[CUR_TICK] = num_unburned_tick;
+    num_burning[CUR_TICK] = num_burning_tick;
+    num_burnt_out[CUR_TICK] = num_burning_tick;
+    num_ember_gen_sum[CUR_TICK] = num_ember_gen_sum_tick;
+    num_ember_recv_sum[CUR_TICK] = num_ember_recv_sum_tick;
+}
+
+static void main_loop(H5::H5File& file) {
+    std::array<hsize_t, 3> full_dims = {hsize_t(NUM_TICKS), hsize_t(NUM_ROWS_LOCAL), hsize_t(NUM_COLS_LOCAL)};
+    auto file_space = H5::DataSpace(full_dims.size(), full_dims.data());
+
+    {% for var in source.tile_data.tile_vars %}
+    {% if var.is_saved %}
+    auto {{ var.name | mangle }}_datatype = {{ var.type.name | h5_type }};
+    auto {{ var.name | mangle }}_dataset = file.createDataSet("{{ var.name }}", {{ var.name | mangle }}_datatype, file_space);
+
+    {% endif %}
+    {% endfor %}
+
+    for (CUR_TICK = 0; CUR_TICK < NUM_TICKS; CUR_TICK++) {
+        execute_tick();
+
+        {{ proc_phase_begin("write_output") }}
+
+        std::array<hsize_t, 3> slab_start = {hsize_t(CUR_TICK), 0, 0};
+        std::array<hsize_t, 3> slab_count = {1, hsize_t(NUM_ROWS_LOCAL), hsize_t(NUM_COLS_LOCAL)};
+        auto mem_space = H5::DataSpace(slab_count.size(), slab_count.data());
+        file_space.selectHyperslab(H5S_SELECT_SET, slab_count.data(), slab_start.data());
+
+        {% for var in source.tile_data.tile_vars %}
+        {% if var.is_saved %}
+        {{ var.name | mangle }}_dataset.write(
+            {{ var.name | mangle }}.data_handle(),
+            {{ var.name | mangle }}_datatype,
+            mem_space,
+            file_space);
+
+        {% endif %}
+        {% endfor %}
+
+        {{ proc_phase_end("write_output") }}
+    }
+}
+
+int main(int argc, char *argv[]) {
+    {{ proc_phase_begin("prog") }}
+
+    argparse::ArgumentParser program(argv[0]);
+    program.add_description("Fire spread simulator.");
+
+    std::string tile_file_name = "";
+    std::string seed_file_name = "";
+    std::string tick_file_name = "";
+    std::string output_file_name = "";
+
+    {% macro add_argument(short_opt, long_opt, help, var) -%}
+    program.add_argument("{{ short_opt }}", "{{ long_opt }}")
+	.required()
+	.help("{{ help }}")
+	.store_into({{ var }});
+    {%- endmacro %}
+
+    // clang-format off
+    {{ add_argument("-n", "--num-ticks", "Num ticks", "NUM_TICKS") }}
+    {{ add_argument("-r", "--num-rows", "Num rows in tile data", "NUM_ROWS") }}
+    {{ add_argument("-c", "--num-cols", "Num cols in tile data", "NUM_COLS") }}
+    {{ add_argument("-t", "--tile-file", "Tile data file (HDF5).", "tile_file_name") }}
+    {{ add_argument("-s", "--seed-file", "Seed data file (HDF5).", "seed_file_name") }}
+    {{ add_argument("-w", "--tick-file", "Tick data file (Parquet).", "tick_file_name") }}
+    {{ add_argument("-o", "--output-file", "Output file (HDF5).", "output_file_name") }}
+
+    {% for cfg in source.configs %}
+    program.add_argument("--config-{{ cfg.name | replace("_", "-") }}")
+        .default_value({{ cfg.type.name | cpp_type_config }}({{ cfg.default | codegen_expr }}))
+	.help("Config option {{ cfg.name }}.")
+	.store_into({{ cfg.name | mangle }});
+
+    {% endfor %}
+    // clang-format on
+
+    try {
+        program.parse_args(argc, argv);
+    } catch (const std::exception& err) {
+        std::cerr << err.what() << std::endl;
+        std::cerr << program;
+        std::exit(1);
+    }
+
+    upcxx::init();
+    auto upcxx_finalize = stdex::scope_exit([=]() {
+        upcxx::finalize();
+    });
+
+    output_file_name = fmt::format("{}.{}", output_file_name, upcxx::rank_me());
+
+    NUM_ROWS_LOCAL = (NUM_ROWS + upcxx::rank_n() - 1) / upcxx::rank_n();
+    ROW_BEGIN = NUM_ROWS_LOCAL * upcxx::rank_me();
+    ROW_END = ROW_BEGIN + NUM_ROWS_LOCAL;
+    if (ROW_END > NUM_ROWS) {
+        ROW_END = NUM_ROWS;
+    }
+    NUM_ROWS_LOCAL = ROW_END - ROW_BEGIN;
+
+    NUM_COLS_LOCAL = NUM_COLS;
+    COL_BEGIN = 0;
+    COL_END = NUM_COLS_LOCAL;
+
+    fmt::println("NUM_TICKS = {}", NUM_TICKS);
+    fmt::println("NUM_ROWS = {}", NUM_ROWS);
+    fmt::println("NUM_COLS = {}", NUM_COLS);
+    fmt::println("seed_file_name = {}", seed_file_name);
+    fmt::println("tick_file_name = {}", tick_file_name);
+    fmt::println("tile_file_name = {}", tile_file_name);
+    fmt::println("output_file_name = {}", output_file_name);
+
+    fmt::println("NUM_ROWS_LOCAL = {}", NUM_ROWS_LOCAL);
+    fmt::println("ROW_BEGIN = {}", ROW_BEGIN);
+    fmt::println("ROW_END = {}", ROW_END);
+
+    fmt::println("NUM_COLS_LOCAL = {}", NUM_COLS_LOCAL);
+    fmt::println("COL_BEGIN = {}", COL_BEGIN);
+    fmt::println("COL_END = {}", COL_END);
+
+    {% for cfg in source.configs %}
+    fmt::println("{{ cfg.name }} = {}", {{ cfg.name | mangle }});
+    {% endfor %}
+
+    double total_alloc_bytes = 0.0;
+
+    {% for name, type in tick_vars %}
+    auto {{ name }}_count = NUM_TICKS;
+    {{ type }}* {{ name }}_mem = new {{ type  }}[{{ name }}_count];
+    auto {{ name  }}_free = stdex::scope_exit([=]() { delete[] {{ name }}_mem; });
+    {{ name }} = stdex::mdspan({{ name }}_mem, NUM_TICKS);
+    total_alloc_bytes += {{ name }}_count * sizeof({{ type }});
+
+    {% endfor %}
+
+    {% for name, type in tile_vars %}
+    auto {{ name }}_count = NUM_ROWS_LOCAL * NUM_COLS_LOCAL;
+    {{ type }}* {{ name }}_mem = new {{ type  }}[{{ name }}_count];
+    auto {{ name  }}_free = stdex::scope_exit([=]() { delete[] {{ name }}_mem; });
+    {{ name }} = stdex::mdspan({{ name }}_mem, NUM_ROWS_LOCAL, NUM_COLS_LOCAL);
+    total_alloc_bytes +=  {{ name }}_count * sizeof({{ type }});
+
+    {% endfor %}
+
+    {% for name, type in message_vars %}
+    {% for grp in ["to_left", "to_right", "from_left", "from_right"] %}
+    auto {{ name }}_{{ grp }}_count = MAX_JUMP_X * NUM_COLS_LOCAL;
+    {{ name }}_{{ grp }}_mem = upcxx::new_array<{{ type  }}>({{ name }}_{{ grp }}_count);
+    auto {{ name  }}_{{ grp }}_free = stdex::scope_exit([=]() { upcxx::delete_array({{ name }}_{{ grp }}_mem); });
+    {{ name }}_{{ grp }} = stdex::mdspan({{ name }}_{{ grp }}_mem.local(), MAX_JUMP_X, NUM_COLS_LOCAL);
+    total_alloc_bytes +=  {{ name }}_{{ grp }}_count * sizeof({{ type }});
+
+    {% endfor %}
+    {% endfor %}
+
+    {% for name, type in jump_vars %}
+    auto {{ name }}_count = NUM_ROWS_LOCAL * NUM_COLS_LOCAL * (2 * MAX_JUMP_X + 1) * (2 * MAX_JUMP_Y + 1);
+    {{ type }}* {{ name }}_mem = new {{ type  }}[{{ name }}_count];
+    auto {{ name  }}_free = stdex::scope_exit([=]() { delete[] {{ name }}_mem; });
+    {{ name }} = stdex::mdspan({{ name }}_mem, NUM_ROWS_LOCAL, NUM_COLS_LOCAL, 2 * MAX_JUMP_X + 1, 2 * MAX_JUMP_Y + 1);
+    total_alloc_bytes +=  {{ name }}_count * sizeof({{ type }});
+
+    {% endfor %}
+
+    std::random_device rnd_device;
+    auto seed = rnd_device();
+    #pragma omp parallel
+    #pragma omp critical
+    {
+        thread_state = new ThreadState();
+        thread_state->rng = RngEngine({ {seed, unsigned(omp_get_thread_num())} });
+        thread_state->log_prob = 0.0;
+
+        {% for name in tick_thread_phase_vars %}
+        thread_state->{{ name }}_start_time.resize(NUM_TICKS, Clock::now());
+        thread_state->{{ name }}_duration.resize(NUM_TICKS, 0.0);
+        total_alloc_bytes +=  NUM_TICKS * sizeof(Clock::time_point);
+        total_alloc_bytes +=  NUM_TICKS * sizeof(double);
+
+        {% endfor %}
+    }
+    auto thread_state_free = stdex::scope_exit([=]() {
+        #pragma omp parallel
+        #pragma omp critical
+        {
+            delete thread_state;
+        }
+    });
+
+    fmt::println("total_alloc_gb = {}", total_alloc_bytes / 1e9);
+
+    upcxx::barrier();
+
+    if (upcxx::rank_me() > 0) {
+        // I have a valid left neighbor
+        {% for name, type in message_vars %}
+        {{ name }}_to_left_addr = upcxx::rpc(upcxx::rank_me() - 1, [](){ return {{ name }}_from_right_mem; }).wait();
+        {% endfor %}
+    }
+    if (upcxx::rank_me() < upcxx::rank_n() - 1) {
+        // I have a valid right neighbor
+        {% for name, type in message_vars %}
+        {{ name }}_to_right_addr = upcxx::rpc(upcxx::rank_me() - 1, [](){ return {{ name }}_from_left_mem; }).wait();
+        {% endfor %}
+    }
+
+    upcxx::barrier();
+
+    {{ proc_phase_begin("init") }}
+    initialize_memory();
+
+    {{ proc_phase_begin("read_input") }}
+    load_tile_data(tile_file_name);
+    load_seed_data(seed_file_name);
+    auto status = load_tick_data(tick_file_name);
+    if (!status.ok()) {
+        throw std::runtime_error(fmt::format("Failed to read tick data: {}", status.ToString()));
+    }
+    {{ proc_phase_end("read_input") }}
+
+    init_change_time();
+    {{ proc_phase_end("init") }}
+
+    H5::H5File output_file(output_file_name, H5F_ACC_CREAT | H5F_ACC_RDWR);
+
+    {{ proc_phase_begin("main") }}
+    main_loop(output_file);
+    {{ proc_phase_end("main") }}
+
+    {% macro save_tick_stat(name, h5_type) %}
+    {
+        std::array<hsize_t, 1> dims = {hsize_t(NUM_TICKS)};
+        auto dataspace = H5::DataSpace(dims.size(), dims.data());
+        auto datatype = {{ h5_type }};
+        auto dataset = output_file.createDataSet("{{ name }}", datatype, dataspace);
+        dataset.write({{ name }}.data_handle(), datatype);
+    }
+    {% endmacro %}
+
+    {{ save_tick_stat("num_unburned", "H5::PredType::NATIVE_INT32") }}
+    {{ save_tick_stat("num_burning", "H5::PredType::NATIVE_INT32") }}
+    {{ save_tick_stat("num_burnt_out", "H5::PredType::NATIVE_INT32") }}
+    {{ save_tick_stat("num_ember_gen_sum", "H5::PredType::NATIVE_INT32") }}
+    {{ save_tick_stat("num_ember_recv_sum", "H5::PredType::NATIVE_INT32") }}
+
+    double log_prob = 0.0;
+    #pragma omp parallel reduction(+: log_prob)
+    {
+        log_prob += thread_state->log_prob;
+    }
+    fmt::println("log_prob = {}", log_prob);
+
+    {{ proc_phase_end("prog") }}
+
+    fmt::println("runtime_s = {}", prog_duration);
+
+    auto runstats = output_file.createGroup("runstats");
+
+    {% macro save_run_stat(name, var_name, h5_type) %}
+    {
+        auto dataspace = H5::DataSpace(H5S_SCALAR);
+        auto datatype = {{ h5_type }};
+        auto attribute = runstats.createAttribute("{{ name }}", datatype, dataspace);
+        attribute.write(datatype, &{{ var_name }});
+    }
+    {% endmacro %}
+
+    {{ save_run_stat("total_alloc_bytes", "total_alloc_bytes", "H5::PredType::NATIVE_DOUBLE") }}
+    {{ save_run_stat("log_prob", "log_prob", "H5::PredType::NATIVE_DOUBLE") }}
+
+    {% for name in proc_phase_vars %}
+    {
+        auto dataspace = H5::DataSpace(H5S_SCALAR);
+        auto datatype = H5::PredType::NATIVE_DOUBLE;
+        auto attribute = runstats.createAttribute("{{ name }}_duration", datatype, dataspace);
+        attribute.write(datatype, &{{ name }}_duration);
+    }
+    {% endfor %}
+
+    {% for name in tick_thread_phase_vars %}
+    {
+        std::array<hsize_t, 2> full_dims = {hsize_t(omp_get_max_threads()), hsize_t(NUM_TICKS)};
+        auto file_space = H5::DataSpace(full_dims.size(), full_dims.data());
+        auto datatype = H5::PredType::NATIVE_DOUBLE;
+        auto dataset = runstats.createDataSet("{{ name }}_duration", datatype, file_space);
+
+        #pragma omp parallel
+        #pragma omp critical
+        {
+            std::array<hsize_t, 2> slab_start = {hsize_t(omp_get_thread_num()), 0};
+            std::array<hsize_t, 2> slab_count = {1, hsize_t(NUM_TICKS)};
+            auto mem_space = H5::DataSpace(slab_count.size(), slab_count.data());
+            file_space.selectHyperslab(H5S_SELECT_SET, slab_count.data(), slab_start.data());
+            dataset.write(thread_state->{{ name }}_duration.data(), datatype, mem_space, file_space);
+        }
+    }
+
+    {% endfor %}
+
+    return 0;
+}
+
+{#- name: "CMakeLists.txt" -#}
+cmake_minimum_required(VERSION 4.0)
+
+project(
+  fire-escape-sim
+  VERSION 0.1.0
+  LANGUAGES CXX)
+
+find_package(fmt REQUIRED)
+find_package(argparse REQUIRED)
+find_package(phmap REQUIRED)
+find_package(mdspan REQUIRED)
+find_package(random123 REQUIRED)
+find_package(Arrow REQUIRED)
+find_package(HDF5 REQUIRED)
+find_package(OpenMP REQUIRED)
+find_package(upcxx REQUIRED)
+
+set(UPCXX_TARGET upcxx::smp-par-opt)
+if (DEFINED ENV{UPCXX_NETWORK})
+    set(UPCXX_TARGET upcxx::$ENV{UPCXX_NETWORK}-par-opt)
+endif()
+message("UPCXX_TARGET = ${UPCXX_TARGET}")
+
+add_executable(simulator simulator.cpp)
+target_link_libraries(simulator
+    PRIVATE
+    fmt::fmt
+    argparse::argparse
+    phmap
+    std::mdspan
+    random123::random123
+    HDF5::HDF5
+    arrow::arrow
+    OpenMP::OpenMP_CXX
+    ${UPCXX_TARGET})
+target_compile_features(simulator PRIVATE cxx_std_23)
+
+{#- name: "conanfile.py" -#}
+# type: ignore
+import os
+from conan import ConanFile
+from conan.tools.cmake import cmake_layout, CMakeDeps, CMakeToolchain, CMake
+
+class FireEscapeSimRecipe(ConanFile):
+    name = "fire-escape-sim"
+    settings = "os", "compiler", "build_type", "arch"
+
+    def layout(self):
+        cmake_layout(self)
+
+    def requirements(self):
+        with_rdma = (
+            "UPCXX_NETWORK" in os.environ and os.environ["UPCXX_NETWORK"] == "ibv"
+        )
+
+        self.requires("fmt/12.1.0")
+        self.requires("argparse/3.2")
+        self.requires("parallel-hashmap/2.0.0")
+        self.requires("mdspan/0.6.0")
+        self.requires("random123/1.14.0")
+        self.requires(
+            "arrow/22.0.0",
+            options=dict(
+                with_csv=True,
+                with_lz4=True,
+                with_snappy=True,
+                with_zstd=True,
+            ),
+        )
+        self.requires("hdf5/1.14.6")
+        self.requires("upcxx/2025.10.0.pci", options=dict(rdma=with_rdma))
+        self.requires("boost/1.89.0", override=True)
+
+    def generate(self):
+        deps = CMakeDeps(self)
+        deps.generate()
+
+        toolchain = CMakeToolchain(self)
+        toolchain.generate()
+
+    def build(self):
+        cmake = CMake(self)
+        cmake.configure()
+        cmake.build()

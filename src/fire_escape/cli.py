@@ -3,6 +3,7 @@
 import click
 
 from .codegen_openmp_cpu import openmp_cpu
+from .codegen_upcxx_openmp_cpu import upcxx_openmp_cpu
 
 
 @click.group()
@@ -11,6 +12,7 @@ def cli():
 
 
 cli.add_command(openmp_cpu)
+cli.add_command(upcxx_openmp_cpu)
 
 
 def main():
