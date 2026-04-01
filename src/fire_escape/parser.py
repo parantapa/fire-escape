@@ -589,11 +589,25 @@ def populate_source_opts(source: Source):
     source.opts["max_jump_x"] = 1
     source.opts["max_jump_y"] = 1
     source.opts["max_ember_count"] = 100
+    source.opts["chunk_size_x"] = 64
+    source.opts["chunk_size_y"] = 64
 
     for opt in source.options:
         if opt.name not in source.opts:
             raise CodeError(f"Unknown option {opt.name}", pos=opt.pos)
         source.opts[opt.name] = opt.value
+
+    if source.opts["chunk_size_x"] < source.opts["max_jump_x"]:
+        raise CodeError(
+            f"chunk_size_x ({source.opts["chunk_size_x"]}) is less than max_jump_x ({source.opts["max_jump_x"]})",
+            pos=source.pos,
+        )
+
+    if source.opts["chunk_size_y"] < source.opts["max_jump_y"]:
+        raise CodeError(
+            f"chunk_size_y ({source.opts["chunk_size_y"]}) is less than max_jump_y ({source.opts["max_jump_y"]})",
+            pos=source.pos,
+        )
 
 
 def validate_tick_data(tick_data: TickData):
