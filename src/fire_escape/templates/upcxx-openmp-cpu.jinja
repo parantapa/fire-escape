@@ -65,337 +65,101 @@ static {{ rtype }} {{ name }}( {{ params |  join(", ") }}) {
 #endline
 
 {#- name: "simulator.cpp" -#}
+#include <cstdint>
 #include <experimental/scope>
 
 #include <spdlog/spdlog.h>
 #include <argparse/argparse.hpp>
-#include <xxhash.h>
-#include <parallel_hashmap/phmap.h>
 
 #include <omp.h>
 #include <upcxx/upcxx.hpp>
 
+#include "chunk_utils.hpp"
+#include "simulator_utils.hpp"
+
 namespace stdex = std::experimental;
 
-template<typename K>
-using flat_hash_set = phmap::flat_hash_set<K>;
-
-template<typename K, typename V>
-using flat_hash_map = phmap::flat_hash_map<K, V>;
-
-{% for opt in source.options %}
-constexpr std::int32_t {{ opt.name | upper }} = {{ opt.value }};
-{% endfor %}
-
-using fire_state_t = std::int8_t;
-constexpr fire_state_t Unburned = 0;
-constexpr fire_state_t Burning = 1;
-constexpr fire_state_t BurntOut = 2;
-
-static std::int32_t NUM_TICKS = 0;
-
-static std::int32_t BEGIN_PX = 0;
-static std::int32_t END_PX = 0;
-static std::int32_t BEGIN_PY = 0;
-static std::int32_t END_PY = 0;
-
-static inline std::int32_t clamp_px(std::int32_t px) {
-    if (px < BEGIN_PX) { px = BEGIN_PX; }
-    if (px > END_PX - 1) { px = END_PX; }
-    return px;
-}
-
-static inline std::int32_t clamp_py(std::int32_t py) {
-    if (py < BEGIN_PY) { py = BEGIN_PY; }
-    if (py > END_PY - 1) { py = END_PY; }
-    return py;
-}
-
-struct Position {
-    std::int32_t px;
-    std::int32_t py;
-
-    bool operator==(const Position&) const = default;
-};
-
-struct Chunk {
-    std::int32_t cx;
-    std::int32_t cy;
-
-    bool operator==(const Chunk&) const = default;
-
-    Chunk north() const noexcept { return {cx, cy - 1}; }
-    Chunk south() const noexcept { return {cx, cy + 1}; }
-    Chunk east() const noexcept { return {cx + 1, cy}; }
-    Chunk west() const noexcept { return {cx - 1, cy}; }
-    Chunk north_east() const noexcept { return {cx + 1, cy - 1}; }
-    Chunk north_west() const noexcept { return {cx - 1, cy - 1}; }
-    Chunk south_east() const noexcept { return {cx + 1, cy + 1}; }
-    Chunk south_west() const noexcept { return {cx - 1, cy + 1}; }
-
-    Position begin() const noexcept {
-        std::int32_t px = clamp_px(cx * CHUNK_SIZE_X);
-        std::int32_t py = clamp_py(cy * CHUNK_SIZE_Y);
-        return {px, py};
-    }
-
-    Position end() const noexcept {
-        return Chunk{cx + 1, cy + 1}.begin();
-    }
-
-    std::int32_t size() const noexcept {
-        auto begin_ = begin();
-        auto end_ = end();
-        return (end_.px - begin_.px) * (end_.py - begin_.py);
-    }
-
-    std::int32_t to_offset(const Position position) const noexcept {
-        auto begin_ = begin();
-        auto end_ = end();
-        auto ystride = (end_.px - begin_.px);
-
-        auto dx = position.px - begin_.px;
-        auto dy = position.py - begin_.py;
-        return dy * ystride + dx;
-    }
-
-    Position to_position(const std::int32_t offset) const noexcept {
-        auto begin_ = begin();
-        auto end_ = end();
-        auto ystride = (end_.px - begin_.px);
-
-        auto dx = offset % ystride;
-        auto dy = (offset - dx) / ystride;
-        return {begin_.px + dx, begin_.py + dy};
-    }
-
-    bool is_valid() const noexcept {
-        std::int32_t cx_begin = BEGIN_PX / CHUNK_SIZE_X;
-        std::int32_t cx_end = END_PX / CHUNK_SIZE_X;
-        std::int32_t cy_begin = BEGIN_PY / CHUNK_SIZE_Y;
-        std::int32_t cy_end = END_PY / CHUNK_SIZE_Y;
-
-        return (cx >= cx_begin && cx < cx_end && cy >= cy_begin && cy < cy_end);
-    }
-
-    XXH64_hash_t hash() const noexcept {
-        std::uint64_t buf = std::uint64_t(cx) << 32 | std::uint64_t(cy);
-        return XXH64(&buf, sizeof(std::uint64_t), 0);
-    }
-
-    upcxx::intrank_t owner_rank() const {
-        return hash() % upcxx::rank_n();
-    }
-};
-
-template<> struct std::hash<Chunk> {
-    std::size_t operator()(Chunk const& chunk) const noexcept {
-        return chunk.hash();
-    }
-};
-
-static inline Chunk get_chunk(const Position position) {
-    return {position.px / CHUNK_SIZE_X, position.py / CHUNK_SIZE_Y};
-}
-
-template<typename Type>
-struct TileChunkData {
-    Chunk chunk;
-    upcxx::global_ptr<Type> lptr;
-    upcxx::global_ptr<Type> rptr;
-
-    TileChunkData()
-        : chunk{}
-        , lptr{nullptr}
-        , rptr{nullptr} {}
-
-
-    TileChunkData(const Chunk chunk_)
-        : chunk{chunk_}
-        , lptr{nullptr}
-        , rptr{nullptr} {
-        lptr = upcxx::new_array<Type>(chunk.size());
-    }
-
-    TileChunkData(const TileChunkData&) = delete;
-
-    TileChunkData(TileChunkData&& other) noexcept
-        : chunk{std::move(other.chunk)}
-        , lptr{std::move(other.lptr)}
-        , rptr{std::move(other.rptr)} {
-            other.lptr = nullptr;
-            other.rptr = nullptr;
-        }
-
-    TileChunkData& operator=(const TileChunkData&) = delete;
-
-    TileChunkData& operator=(TileChunkData&& other) noexcept {
-        if (!lptr.is_null()) {
-            upcxx::delete_array(lptr);
-        }
-
-        chunk = std::move(other.chunk);
-        lptr = std::move(other.lptr);
-        rptr = std::move(other.rptr);
-
-        other.lptr = nullptr;
-        other.rptr = nullptr;
-
-        return *this;
-    }
-
-    ~TileChunkData() {
-        if (!lptr.is_null()) {
-            upcxx::delete_array(lptr);
-            lptr = nullptr;
-            rptr = nullptr;
-        }
-    }
-};
-
-static inline std::vector<Chunk>* LOCAL_CHUNKS = nullptr;
-static inline std::vector<Chunk>* REMOTE_CHUNKS = nullptr;
-static inline flat_hash_set<Chunk>* AVAILABLE_CHUNKS = nullptr;
-
-{%
-    set tile_vars = [
-        ("change_time", "std::int32_t"),
-        ("num_ember_gen", "std::int32_t"),
-        ("num_ember_recv", "std::int32_t")
-    ]
-%}
-
-{% for var in source.tile_data.tile_vars %}
-{% if var.is_real %}
-{% do tile_vars.append((var.name | mangle, var.type.name | cpp_type)) %}
-{% endif %}
-{% endfor %}
-
-{% for name, type in tile_vars %}
-static flat_hash_map<Chunk, TileChunkData<{{ type }}>>* {{ name }} = nullptr;
-{% endfor %}
-
-int main(int argc, char* argv[]) {
+void parse_arguments(int argc, char *argv[]) {
     argparse::ArgumentParser program(argv[0]);
     program.add_description("Fire spread simulator.");
 
-    std::string tile_file_name = "";
-    std::string seed_file_name = "";
-    std::string tick_file_name = "";
-    std::string output_file_name = "";
+    {% macro add_argument(short_opt, long_opt, help, var) -%}
+    program.add_argument("{{ short_opt }}", "{{ long_opt }}")
+	.required()
+	.help("{{ help }}")
+	.store_into({{ var }});
+    {%- endmacro %}
 
     // clang-format off
-    program.add_argument("-n", "--num-ticks")
-	.required()
-	.help("Num ticks")
-	.store_into(NUM_TICKS);
-    program.add_argument("-bx", "--begin-x")
-        .required()
-	.help("Tile data X range begin.")
-	.store_into(BEGIN_PX);
-    program.add_argument("-by", "--begin-y")
-        .required()
-	.help("Tile data Y range begin.")
-	.store_into(BEGIN_PY);
-    program.add_argument("-ex", "--end-x")
-	.required()
-	.help("Tile data X range end.")
-	.store_into(END_PX);
-    program.add_argument("-ey", "--end-y")
-	.required()
-	.help("Tile data Y range end.")
-	.store_into(END_PY);
-    program.add_argument("-t", "--tile-file")
-	.required()
-	.help("Tile data file (HDF5).")
-	.store_into(tile_file_name);
-    program.add_argument("-s", "--seed-file")
-	.required()
-	.help("Seed data file (HDF5).")
-	.store_into(seed_file_name);
-    program.add_argument("-w", "--tick-file")
-	.required()
-	.help("Tick data file (Parquet).")
-	.store_into(tick_file_name);
-    program.add_argument("-o", "--output-file")
-	.required()
-	.help("Output file (HDF5).")
-	.store_into(output_file_name);
+    {{ add_argument("-n", "--num-ticks", "Num ticks", "NUM_TICKS") }}
+    {{ add_argument("-bx", "--begin-x", "Starting x coordinate (inclusive).", "WORLD_REGION.begin.x") }}
+    {{ add_argument("-ex", "--end-x", "Ending x coordinate (exclusive).", "WORLD_REGION.end.x") }}
+    {{ add_argument("-by", "--begin-y", "Starting y coordinate (inclusive).", "WORLD_REGION.begin.y") }}
+    {{ add_argument("-ey", "--end-y", "Ending y coordinate (exclusive).", "WORLD_REGION.end.y") }}
+    {{ add_argument("-t", "--tile-file", "Tile data file (HDF5).", "TILE_FILE_NAME") }}
+    {{ add_argument("-s", "--seed-file", "Seed data file (HDF5).", "SEED_FILE_NAME") }}
+    {{ add_argument("-w", "--tick-file", "Tick data file (Parquet).", "TICK_FILE_NAME") }}
+    {{ add_argument("-o", "--output-file", "Output file (HDF5).", "OUTPUT_FILE_NAME") }}
     // clang-format on
 
     try {
         program.parse_args(argc, argv);
     } catch (const std::exception& err) {
-        std::cerr << err.what() << std::endl;
-        std::cerr << program;
+        if (upcxx::rank_me() == 0) {
+            std::cerr << err.what() << std::endl;
+            std::cerr << program;
+        }
         std::exit(1);
     }
 
-    upcxx::init();
-    auto upcxx_finalize = stdex::scope_exit([]() { upcxx::finalize(); });
-    spdlog::set_pattern(fmt::format("{}/{}: %v", upcxx::rank_me(), upcxx::rank_n()));
-
     if (upcxx::rank_me() == 0) {
         spdlog::info("NUM_TICKS = {}", NUM_TICKS);
-        spdlog::info("X_RANGE = [{},{})", BEGIN_PX, END_PX);
-        spdlog::info("Y_RANGE = [{},{})", BEGIN_PY, END_PY);
-        spdlog::info("seed_file_name = {}", seed_file_name);
-        spdlog::info("tick_file_name = {}", tick_file_name);
-        spdlog::info("tile_file_name = {}", tile_file_name);
-        spdlog::info("output_file_name = {}", output_file_name);
+        spdlog::info("X_RANGE = [{}, {})", WORLD_REGION.begin.x, WORLD_REGION.end.x);
+        spdlog::info("Y_RANGE = [{}, {})", WORLD_REGION.begin.y, WORLD_REGION.end.y);
+        spdlog::info("SEED_FILE_NAME = {}", SEED_FILE_NAME);
+        spdlog::info("TICK_FILE_NAME = {}", TICK_FILE_NAME);
+        spdlog::info("TILE_FILE_NAME = {}", TILE_FILE_NAME);
+        spdlog::info("OUTPUT_FILE_NAME = {}", OUTPUT_FILE_NAME);
     }
+}
 
-    std::vector<Chunk> local_chunks;
-    std::vector<Chunk> remote_chunks;
-    flat_hash_set<Chunk> available_chunks;
+int main(int argc, char* argv[]) {
+    upcxx::init();
+    auto upcxx_finalize_guard = stdex::scope_exit([](){ upcxx::finalize(); });
 
-    for (std::int32_t py = BEGIN_PY; py < END_PY; py += CHUNK_SIZE_Y) {
-        for (std::int32_t px = BEGIN_PX; px < END_PX; px += CHUNK_SIZE_X) {
-            Chunk chunk = get_chunk({px, py});
-            if (chunk.owner_rank() == upcxx::rank_me()) {
-                local_chunks.push_back(chunk);
-                available_chunks.insert(chunk);
-            }
-        }
-    }
-    for (const auto& chunk: local_chunks) {
-        const Chunk adjacent_chunks[] = {
-            chunk.north(),
-            chunk.south(),
-            chunk.east(),
-            chunk.west(),
-            chunk.north_east(),
-            chunk.north_west(),
-            chunk.south_east(),
-            chunk.south_west(),
-        };
-        for (const auto& achunk: adjacent_chunks) {
-            if (achunk.is_valid() && !available_chunks.contains(achunk)) {
-                remote_chunks.push_back(achunk);
-                available_chunks.insert(achunk);
+    setup_spdlog();
+    parse_arguments(argc, argv);
+
+    // initialize data structures
+    hash_set<Vector2> owned_chunks;
+    OWNED_CHUNKS = &owned_chunks;
+    
+    hash_map<Vector2, ChunkInfo> chunk_info;
+    CHUNK_INFO = &chunk_info;
+
+    // load data
+    populate_local_chunks();
+
+    for (int i = 0; i < upcxx::rank_n(); i++) {
+        upcxx::barrier();
+        if (i == upcxx::rank_me()) {
+            for (const auto& [_, chunk_info]: chunk_info) {
+                spdlog::info("{}", chunk_info);
             }
         }
     }
 
-    spdlog::info("num_local_chunks = {}", local_chunks.size());
-    spdlog::info("num_remote_chunks = {}", remote_chunks.size());
-    spdlog::info("num_available_chunks = {}", available_chunks.size());
 
-    LOCAL_CHUNKS = &local_chunks;
-    REMOTE_CHUNKS = &remote_chunks;
-    AVAILABLE_CHUNKS = &available_chunks;
+    // for (CUR_TICK = 0; CUR_TICK < NUM_TICKS; CUR_TICK++) {
+    //     upcxx::barrier();
 
-    {% for name, type in tile_vars %}
-    flat_hash_map<Chunk, TileChunkData<{{ type }}>> {{ name }}_chunk_data;
-    for (const auto& chunk: available_chunks) {
-            {{ name }}_chunk_data.insert({ chunk, TileChunkData<{{ type }}>(chunk) });
-    }
-    {{ name }} = &{{ name }}_chunk_data;
-    {% endfor %}
+    //     if (upcxx::rank_me() == 0) {
+    //         spdlog::info("Starting tick: {}", CUR_TICK);
+    //     }
+    // };
 
     return 0;
 }
-
 {#- name: "CMakeLists.txt" -#}
 cmake_minimum_required(VERSION 4.0)
 
@@ -409,6 +173,7 @@ find_package(spdlog REQUIRED)
 find_package(argparse REQUIRED)
 find_package(xxHash REQUIRED)
 find_package(phmap REQUIRED)
+find_package(cista REQUIRED)
 find_package(Arrow REQUIRED)
 find_package(HDF5 REQUIRED)
 find_package(upcxx REQUIRED)
@@ -428,6 +193,7 @@ target_link_libraries(
           argparse::argparse
           xxHash::xxhash
           phmap
+          cista::cista
           arrow::arrow
           HDF5::HDF5
           ${UPCXX_TARGET}
@@ -453,6 +219,7 @@ class FireEscapeSimRecipe(ConanFile):
         self.requires("argparse/3.2")
         self.requires("xxhash/0.8.3")
         self.requires("parallel-hashmap/2.0.0")
+        self.requires("cista/0.16")
         self.requires("arrow/23.0.1")
         self.requires("hdf5/1.14.6")
         self.requires("upcxx/2025.10.0.pci")
