@@ -21,12 +21,14 @@ tile-data:
 
     pos: position
     state: fire_state seed save
+    state_change_time: change_time
 
 fire-model:
     create-embers(t) : poisson[ember_creation_rate(t.fuel, t.moisture)]
     ember-jump-likelihood(s, d) : ember_jump_likelihood(s.pos, d.pos)
     ember-death-prob(s, d) : ember_death_prob(s.pos, d.pos)
-    ignition-prob(t) : ignition_prob(t.fuel, t.moisture)
+    ember-ignition-prob(t) : ignition_prob(t.fuel, t.moisture)
+    local-ignition-prob(n, t) : ignition_prob(t.fuel, t.moisture)
     burn-time(t) : normal[t.burn_time, 1.0]
 
 def ember_creation_rate(fuel: float, moisture: float) -> float:
