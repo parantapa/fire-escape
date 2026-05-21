@@ -1,12 +1,12 @@
 # Sample forest fire simulation
 # Written in Forest Fire Simulation Language (FFSL)
 
-option max_jump_x = 1
-option max_jump_y = 1
+option max_jump_x = 8
+option max_jump_y = 8
 option max_ember_count = 1024
 
-config base_ember_rate: float = 0.5
-config base_ignition_rate: float = 0.03
+config base_ember_rate: float = 0.7
+config base_ignition_rate: float = 0.5
 
 tick-data:
     wind_speed: float
@@ -21,15 +21,15 @@ tile-data:
 
     pos: position
     state: fire_state seed save
-    state_change_time: change_time
 
 fire-model:
-    create-embers(t) : poisson[ember_creation_rate(t.fuel, t.moisture)]
+    create-embers(t) : poisson[ember_creation_rate(t.fuel, t.moisture) * 200]
     ember-jump-likelihood(s, d) : ember_jump_likelihood(s.pos, d.pos)
     ember-death-prob(s, d) : ember_death_prob(s.pos, d.pos)
     ember-ignition-prob(t) : ignition_prob(t.fuel, t.moisture)
-    local-ignition-prob(n, t) : ignition_prob(t.fuel, t.moisture)
-    burn-time(t) : normal[t.burn_time, 1.0]
+    create-flames(t) : deterministic[1.0]
+    flame-ignition-prob(t) : ignition_prob(t.fuel, t.moisture)
+    burn-time(t) : normal[t.burn_time * 20, 1.0]
 
 def ember_creation_rate(fuel: float, moisture: float) -> float:
     moisture_factor: float = exp(-2.0 * moisture)
