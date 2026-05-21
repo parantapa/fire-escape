@@ -11,6 +11,7 @@ from lark import Lark, Tree, Token
 from lark.indenter import Indenter
 
 from .ast_nodes import *
+from .ast_nodes import DeterministicDist
 from .error import *
 
 from .type_check import check_type, TypeEnv
@@ -291,6 +292,10 @@ def build_ast(tree: Tree, file: str):
             mean, std = children
             return NormalDist(mean=mean, std=std, pos=pos, children=children)
 
+        case "deterministic_dist":
+            (child,) = children
+            return DeterministicDist(expr=child, pos=pos, children=children)
+
         case "create_embers":
             var_name, dist = children
             var_name = var_name.value
@@ -320,10 +325,24 @@ def build_ast(tree: Tree, file: str):
                 children=[prob],
             )
 
-        case "ignition_prob":
+        case "ember_ignition_prob":
             var_name, prob = children
             var_name = var_name.value
-            return IgnitionProb(var_name=var_name, prob=prob, pos=pos, children=[prob])
+            return EmberIgnitionProb(
+                var_name=var_name, prob=prob, pos=pos, children=[prob]
+            )
+
+        case "create_flames":
+            var_name, dist = children
+            var_name = var_name.value
+            return CreateFlames(var_name=var_name, dist=dist, pos=pos, children=[dist])
+
+        case "flame_ignition_prob":
+            var_name, prob = children
+            var_name = var_name.value
+            return FlameIgnitionProb(
+                var_name=var_name, prob=prob, pos=pos, children=[prob]
+            )
 
         case "burn_time":
             var_name, dist = children
@@ -334,7 +353,9 @@ def build_ast(tree: Tree, file: str):
             create_embers = None
             ember_jump_likelihood = None
             ember_death_prob = None
-            ignition_prob = None
+            ember_ignition_prob = None
+            create_flames = None
+            flame_ignition_prob = None
             burn_time = None
 
             for child in children:
@@ -360,13 +381,27 @@ def build_ast(tree: Tree, file: str):
                                 pos=child.pos,
                             )
                         ember_death_prob = child
-                    case IgnitionProb():
-                        if ignition_prob is not None:
+                    case EmberIgnitionProb():
+                        if ember_ignition_prob is not None:
                             raise ParseError(
-                                "ignition-prob has been defined multiple times",
+                                "ember-ignition-prob has been defined multiple times",
                                 pos=child.pos,
                             )
-                        ignition_prob = child
+                        ember_ignition_prob = child
+                    case CreateFlames():
+                        if create_flames is not None:
+                            raise ParseError(
+                                "create-flames has been defined multiple times",
+                                pos=child.pos,
+                            )
+                        create_flames = child
+                    case FlameIgnitionProb():
+                        if flame_ignition_prob is not None:
+                            raise ParseError(
+                                "flame-ignition-prob has been defined multiple times",
+                                pos=child.pos,
+                            )
+                        flame_ignition_prob = child
                     case BurnTime():
                         if burn_time is not None:
                             raise ParseError(
@@ -392,9 +427,19 @@ def build_ast(tree: Tree, file: str):
                     "ember-death-prob has not been defined",
                     pos=pos,
                 )
-            if ignition_prob is None:
+            if ember_ignition_prob is None:
                 raise ParseError(
                     "ignition-prob has not been defined",
+                    pos=pos,
+                )
+            if create_flames is None:
+                raise ParseError(
+                    "create-flames has not been defined",
+                    pos=pos,
+                )
+            if flame_ignition_prob is None:
+                raise ParseError(
+                    "flame-ignition-prob has not been defined",
                     pos=pos,
                 )
             if burn_time is None:
@@ -407,7 +452,9 @@ def build_ast(tree: Tree, file: str):
                 create_embers=create_embers,
                 ember_jump_likelihood=ember_jump_likelihood,
                 ember_death_prob=ember_death_prob,
-                ignition_prob=ignition_prob,
+                ember_ignition_prob=ember_ignition_prob,
+                create_flames=create_flames,
+                flame_ignition_prob=flame_ignition_prob,
                 burn_time=burn_time,
                 pos=pos,
                 children=children,
@@ -518,7 +565,13 @@ def build_scope(node: AstNode, scope: ChainMap[str, Any]):
                 )
             scope[var.name] = var
 
-        case CreateEmbers() | IgnitionProb() | BurnTime() as obj:
+        case (
+            CreateEmbers()
+            | EmberIgnitionProb()
+            | CreateFlames()
+            | FlameIgnitionProb()
+            | BurnTime() as obj
+        ):
             scope = scope.new_child()
 
             obj.scope = scope
@@ -567,7 +620,13 @@ def link_return_statements(node: AstNode, func: Func | None):
 @node_error_attributer
 def populate_tile_objects(node: AstNode, tile_data: TileData):
     match node:
-        case CreateEmbers() | IgnitionProb() | BurnTime() as obj:
+        case (
+            CreateEmbers()
+            | EmberIgnitionProb()
+            | CreateFlames()
+            | FlameIgnitionProb()
+            | BurnTime() as obj
+        ):
             assert obj.scope is not None
             ref: BuiltinObject = obj.scope[obj.var_name]
 

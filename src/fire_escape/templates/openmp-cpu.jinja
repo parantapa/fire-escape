@@ -180,8 +180,10 @@ double {{ name }}_duration = 0;
     set tick_thread_phase_vars = [
         "reset_for_tick",
         "create_embers",
+        "create_flames",
         "compute_jump_dist",
         "assign_embers",
+        "assign_flames",
         "do_ignition",
         "do_transition",
         "count_states"
@@ -232,7 +234,9 @@ static {{ cfg.type.name | cpp_type_config }} {{ cfg.name | mangle }} = {{ cfg.ty
     ("num_burning", "std::int32_t"),
     ("num_burnt_out", "std::int32_t"),
     ("num_ember_gen_sum", "std::int32_t"),
+    ("num_flame_gen_sum", "std::int32_t"),
     ("num_ember_recv_sum", "std::int32_t"),
+    ("num_flame_recv_sum", "std::int32_t"),
 ] %}
 
 {% for var in source.tick_data.tick_vars %}
@@ -249,7 +253,9 @@ static stdex::mdspan<{{ type }}, tick_extents_t> {{ name }};
     set tile_vars = [
         ("change_time", "std::int32_t"),
         ("num_ember_gen", "std::int32_t"),
-        ("num_ember_recv", "std::int32_t")
+        ("num_flame_gen", "std::int32_t"),
+        ("num_ember_recv", "std::int32_t"),
+        ("num_flame_recv", "std::int32_t")
     ]
 %}
 
@@ -535,6 +541,8 @@ static void execute_tick() {
     std::int32_t num_burnt_out_tick = 0;
     std::int32_t num_ember_gen_sum_tick = 0;
     std::int32_t num_ember_recv_sum_tick = 0;
+    std::int32_t num_flame_gen_sum_tick = 0;
+    std::int32_t num_flame_recv_sum_tick = 0;
 
     #pragma omp parallel
     {
@@ -601,6 +609,29 @@ static void execute_tick() {
             }
         }
         {{ tick_thread_phase_end("create_embers") }}
+
+        // Create flames
+        {{ tick_thread_phase_begin("create_flames") }}
+        #pragma omp for reduction(+: num_flame_gen_sum_tick) collapse(2) schedule(guided)
+        for (std::int32_t x = 0; x < NUM_ROWS; x++) {
+            for (std::int32_t y = 0; y < NUM_COLS; y++) {
+                if ({{ source.tile_data.state_var.name | mangle }}[x, y] == Burning) [[unlikely]] {
+                    [[maybe_unused]] Position pos{x, y};
+
+                    // clang-format off
+                    float rate = {{ source.fire_model.create_flames.dist.expr | codegen_expr }};
+                    // clang-format on
+                    rate = std::max<float>(0.0, rate);
+
+                    if (rate > 0.0) {
+                        auto count = rate;
+                        num_flame_gen[x, y] = count;
+                        num_flame_gen_sum_tick += count;
+                    }
+                }
+            }
+        }
+        {{ tick_thread_phase_end("create_flames") }}
 
         // Compute jump dist
         {{ tick_thread_phase_begin("compute_jump_dist") }}
@@ -669,19 +700,46 @@ static void execute_tick() {
         }
         {{ tick_thread_phase_end("assign_embers") }}
 
+        // Assign flames to receivers
+        {{ tick_thread_phase_begin("assign_flames") }}
+        #pragma omp for reduction(+: num_flame_recv_sum_tick) collapse(2) schedule(guided)
+        for (std::int32_t sx = 0; sx < NUM_ROWS; sx++) {
+            for (std::int32_t sy = 0; sy < NUM_COLS; sy++) {
+                if (num_flame_gen[sx, sy] > 0) [[unlikely]] {
+                    auto dxirange = std::array<std::int32_t, 2>{-1, 1};
+                    auto dyirange = std::array<std::int32_t, 2>{-1, 1};
+                    for (std::int32_t dxi: dxirange) {
+                        for (std::int32_t dyi: dyirange) {
+                            std::int32_t dx = sx + dxi;
+                            std::int32_t dy = sy + dyi;
+                            if (is_valid_position(dx, dy)) {
+                                #pragma omp atomic update
+                                num_flame_recv[dx, dy] += num_flame_gen[sx, sy];
+
+                                num_flame_recv_sum_tick += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        {{ tick_thread_phase_end("assign_flames") }}
+
         // Do ignition
         {{ tick_thread_phase_begin("do_ignition") }}
         #pragma omp for collapse(2) schedule(guided)
         for (std::int32_t x = 0; x < NUM_ROWS; x++) {
             for (std::int32_t y = 0; y < NUM_COLS; y++) {
-                if ({{ source.tile_data.state_var.name | mangle }}[x, y] == Unburned && num_ember_recv[x, y] > 0) [[unlikely]] {
+                if ({{ source.tile_data.state_var.name | mangle }}[x, y] == Unburned && (num_ember_recv[x, y] > 0 || num_flame_recv[x, y] > 0)) [[unlikely]] {
                     [[maybe_unused]] Position pos{x, y};
 
                     // clang-format off
-                    float ignition_prob = {{ source.fire_model.ignition_prob.prob | codegen_expr }};
+                    float ember_ignition_prob = {{ source.fire_model.ember_ignition_prob.prob | codegen_expr }};
+                    float flame_ignition_prob = {{ source.fire_model.flame_ignition_prob.prob | codegen_expr }};
                     // clang-format on
-                    ignition_prob = clamp(ignition_prob, 0.0, 1.0);
-                    ignition_prob = 1.0 - std::powf(1.0 - ignition_prob, num_ember_recv[x, y]);
+                    ember_ignition_prob = clamp(ember_ignition_prob, 0.0, 1.0);
+                    flame_ignition_prob = clamp(flame_ignition_prob, 0.0, 1.0);
+                    float ignition_prob = 1.0 - std::powf(1.0 - ember_ignition_prob, num_ember_recv[x, y]) * std::powf(1.0 - flame_ignition_prob, num_flame_recv[x, y]);
 
                     if (sample_uniform(thread_state->rng) < ignition_prob) {
                         thread_state->log_prob += std::logf(ignition_prob);
@@ -698,7 +756,7 @@ static void execute_tick() {
                         {{ source.tile_data.state_var.name | mangle }}[x, y] = Burning;
                         change_time[x, y] = CUR_TICK + burn_time;
                     } else {
-                        thread_state->log_prob += std::logf(1.0 - ignition_prob);
+                        thread_state->log_prob += std::logf(1.0 - ember_ignition_prob);
                     }
                 }
             }
@@ -741,6 +799,8 @@ static void execute_tick() {
     num_burnt_out[CUR_TICK] = num_burning_tick;
     num_ember_gen_sum[CUR_TICK] = num_ember_gen_sum_tick;
     num_ember_recv_sum[CUR_TICK] = num_ember_recv_sum_tick;
+    num_flame_gen_sum[CUR_TICK] = num_flame_gen_sum_tick;
+    num_flame_recv_sum[CUR_TICK] = num_flame_recv_sum_tick;
 }
 
 static void main_loop(H5::H5File& file) {
@@ -928,6 +988,8 @@ int main(int argc, char *argv[]) {
     {{ save_tick_stat("num_burnt_out", "H5::PredType::NATIVE_INT32") }}
     {{ save_tick_stat("num_ember_gen_sum", "H5::PredType::NATIVE_INT32") }}
     {{ save_tick_stat("num_ember_recv_sum", "H5::PredType::NATIVE_INT32") }}
+    {{ save_tick_stat("num_flame_gen_sum", "H5::PredType::NATIVE_INT32") }}
+    {{ save_tick_stat("num_flame_recv_sum", "H5::PredType::NATIVE_INT32") }}
 
     double log_prob = 0.0;
     #pragma omp parallel reduction(+: log_prob)

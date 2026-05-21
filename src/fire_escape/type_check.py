@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import networkx as nx
 
 from .ast_nodes import *
+from .ast_nodes import DeterministicDist
 from .builtins import *
 from .error import *
 
@@ -292,6 +293,10 @@ def check_type(node: AstNode, env: TypeEnv):
                 if not env.is_numeric(get_type(dist.std)):
                     raise TypeError("Expected numeric expression", dist.std.pos)
 
+            case DeterministicDist() as dist:
+                if not env.is_numeric(get_type(dist.expr)):
+                    raise TypeError("Expected numeric expression", dist.expr.pos)
+
             case EmberJumpLikelihood():
                 if not env.is_numeric(get_type(node.like)):
                     raise TypeError("Expected numeric expression", node.like.pos)
@@ -300,7 +305,11 @@ def check_type(node: AstNode, env: TypeEnv):
                 if not env.is_numeric(get_type(node.prob)):
                     raise TypeError("Expected numeric expression", node.prob.pos)
 
-            case IgnitionProb():
+            case EmberIgnitionProb():
+                if not env.is_numeric(get_type(node.prob)):
+                    raise TypeError("Expected numeric expression", node.prob.pos)
+
+            case FlameIgnitionProb():
                 if not env.is_numeric(get_type(node.prob)):
                     raise TypeError("Expected numeric expression", node.prob.pos)
 

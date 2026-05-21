@@ -36,7 +36,9 @@ __all__ = [
     "CreateEmbers",
     "EmberJumpLikelihood",
     "EmberDeathProb",
-    "IgnitionProb",
+    "EmberIgnitionProb",
+    "CreateFlames",
+    "FlameIgnitionProb",
     "BurnTime",
     "FireModel",
 ]
@@ -276,6 +278,10 @@ class NormalDist(AstNode):
     std: Expression
 
 
+class DeterministicDist(AstNode):
+    expr: Expression
+
+
 class CreateEmbers(AstNode):
     var_name: str
     dist: PoissonDist
@@ -296,7 +302,19 @@ class EmberDeathProb(AstNode):
     scope: ChainMap[str, Any] | None = Field(default=None, repr=False)
 
 
-class IgnitionProb(AstNode):
+class EmberIgnitionProb(AstNode):
+    var_name: str
+    prob: Expression
+    scope: ChainMap[str, Any] | None = Field(default=None, repr=False)
+
+
+class CreateFlames(AstNode):
+    var_name: str
+    dist: DeterministicDist
+    scope: ChainMap[str, Any] | None = Field(default=None, repr=False)
+
+
+class FlameIgnitionProb(AstNode):
     var_name: str
     prob: Expression
     scope: ChainMap[str, Any] | None = Field(default=None, repr=False)
@@ -312,7 +330,9 @@ class FireModel(AstNode):
     create_embers: CreateEmbers
     ember_jump_likelihood: EmberJumpLikelihood
     ember_death_prob: EmberDeathProb
-    ignition_prob: IgnitionProb
+    ember_ignition_prob: EmberIgnitionProb
+    create_flames: CreateFlames
+    flame_ignition_prob: FlameIgnitionProb
     burn_time: BurnTime
 
 
