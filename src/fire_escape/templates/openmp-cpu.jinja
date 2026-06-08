@@ -115,8 +115,8 @@ static inline float alignment(Position a, Position b, float direction) {
 
     float d_abs = std::hypotf(dx, dy);
 
-    float wx = std::sinf(direction / 360.0);
-    float wy = std::cosf(direction / 360.0);
+    float wx = std::sinf(direction * std::numbers::pi / 180.0);
+    float wy = std::cosf(direction * std::numbers::pi / 180.0);
 
     return (dx * wx + dy * wy) / d_abs;
 }
