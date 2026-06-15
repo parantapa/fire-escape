@@ -234,9 +234,9 @@ static {{ cfg.type.name | cpp_type_config }} {{ cfg.name | mangle }} = {{ cfg.ty
     ("num_burning", "std::int32_t"),
     ("num_burnt_out", "std::int32_t"),
     ("num_ember_gen_sum", "std::int32_t"),
-    ("num_flame_gen_sum", "std::int32_t"),
+    ("num_flame_gen_sum", "float"),
     ("num_ember_recv_sum", "std::int32_t"),
-    ("num_flame_recv_sum", "std::int32_t"),
+    ("num_flame_recv_sum", "float"),
 ] %}
 
 {% for var in source.tick_data.tick_vars %}
@@ -253,9 +253,9 @@ static stdex::mdspan<{{ type }}, tick_extents_t> {{ name }};
     set tile_vars = [
         ("change_time", "std::int32_t"),
         ("num_ember_gen", "std::int32_t"),
-        ("num_flame_gen", "std::int32_t"),
+        ("num_flame_gen", "float"),
         ("num_ember_recv", "std::int32_t"),
-        ("num_flame_recv", "std::int32_t")
+        ("num_flame_recv", "float")
     ]
 %}
 
@@ -541,8 +541,8 @@ static void execute_tick() {
     std::int32_t num_burnt_out_tick = 0;
     std::int32_t num_ember_gen_sum_tick = 0;
     std::int32_t num_ember_recv_sum_tick = 0;
-    std::int32_t num_flame_gen_sum_tick = 0;
-    std::int32_t num_flame_recv_sum_tick = 0;
+    float num_flame_gen_sum_tick = 0;
+    float num_flame_recv_sum_tick = 0;
 
     #pragma omp parallel
     {
@@ -988,8 +988,8 @@ int main(int argc, char *argv[]) {
     {{ save_tick_stat("num_burnt_out", "H5::PredType::NATIVE_INT32") }}
     {{ save_tick_stat("num_ember_gen_sum", "H5::PredType::NATIVE_INT32") }}
     {{ save_tick_stat("num_ember_recv_sum", "H5::PredType::NATIVE_INT32") }}
-    {{ save_tick_stat("num_flame_gen_sum", "H5::PredType::NATIVE_INT32") }}
-    {{ save_tick_stat("num_flame_recv_sum", "H5::PredType::NATIVE_INT32") }}
+    {{ save_tick_stat("num_flame_gen_sum", "H5::PredType::NATIVE_FLOAT") }}
+    {{ save_tick_stat("num_flame_recv_sum", "H5::PredType::NATIVE_FLOAT") }}
 
     double log_prob = 0.0;
     #pragma omp parallel reduction(+: log_prob)
