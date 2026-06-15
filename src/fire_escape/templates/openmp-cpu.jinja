@@ -706,17 +706,19 @@ static void execute_tick() {
         for (std::int32_t sx = 0; sx < NUM_ROWS; sx++) {
             for (std::int32_t sy = 0; sy < NUM_COLS; sy++) {
                 if (num_flame_gen[sx, sy] > 0) [[unlikely]] {
-                    auto dxirange = std::array<std::int32_t, 2>{-1, 1};
-                    auto dyirange = std::array<std::int32_t, 2>{-1, 1};
+                    auto dxirange = std::array<std::int32_t, 3>{-1, 0, 1};
+                    auto dyirange = std::array<std::int32_t, 3>{-1, 0, 1};
                     for (std::int32_t dxi: dxirange) {
                         for (std::int32_t dyi: dyirange) {
-                            std::int32_t dx = sx + dxi;
-                            std::int32_t dy = sy + dyi;
-                            if (is_valid_position(dx, dy)) {
-                                #pragma omp atomic update
-                                num_flame_recv[dx, dy] += num_flame_gen[sx, sy];
+                            if (dxi != 0 || dyi != 0) {
+                                std::int32_t dx = sx + dxi;
+                                std::int32_t dy = sy + dyi;
+                                if (is_valid_position(dx, dy)) {
+                                    #pragma omp atomic update
+                                    num_flame_recv[dx, dy] += num_flame_gen[sx, sy];
 
-                                num_flame_recv_sum_tick += 1;
+                                    num_flame_recv_sum_tick += 1;
+                                }
                             }
                         }
                     }
