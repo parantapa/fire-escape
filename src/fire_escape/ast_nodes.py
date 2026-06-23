@@ -38,6 +38,7 @@ __all__ = [
     "EmberDeathProb",
     "EmberIgnitionProb",
     "CreateFlames",
+    "FlameSpreadWeight",
     "FlameIgnitionProb",
     "BurnTime",
     "FireModel",
@@ -313,6 +314,11 @@ class CreateFlames(AstNode):
     dist: DeterministicDist
     scope: ChainMap[str, Any] | None = Field(default=None, repr=False)
 
+class FlameSpreadWeight(AstNode):
+    svar_name: str
+    dvar_name: str
+    weight: Expression
+    scope: ChainMap[str, Any] | None = Field(default=None, repr=False)
 
 class FlameIgnitionProb(AstNode):
     var_name: str
@@ -332,6 +338,7 @@ class FireModel(AstNode):
     ember_death_prob: EmberDeathProb
     ember_ignition_prob: EmberIgnitionProb
     create_flames: CreateFlames
+    flame_spread_weight: FlameSpreadWeight
     flame_ignition_prob: FlameIgnitionProb
     burn_time: BurnTime
 

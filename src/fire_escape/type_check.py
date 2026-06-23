@@ -305,6 +305,10 @@ def check_type(node: AstNode, env: TypeEnv):
                 if not env.is_numeric(get_type(node.prob)):
                     raise TypeError("Expected numeric expression", node.prob.pos)
 
+            case FlameSpreadWeight():
+                if not env.is_numeric(get_type(node.weight)):
+                    raise TypeError("Expected numeric expression", node.weight.pos)
+
             case EmberIgnitionProb():
                 if not env.is_numeric(get_type(node.prob)):
                     raise TypeError("Expected numeric expression", node.prob.pos)

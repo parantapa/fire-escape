@@ -714,8 +714,16 @@ static void execute_tick() {
                                 std::int32_t dx = sx + dxi;
                                 std::int32_t dy = sy + dyi;
                                 if (is_valid_position(dx, dy)) {
+                                    [[maybe_unused]] Position src_pos{sx, sy};
+                                    [[maybe_unused]] Position dst_pos{dx, dy};
+
+                                    // clang-format off
+                                    float spread_weight = {{ source.fire_model.flame_spread_weight.weight | codegen_expr }};
+                                    // clang-format on
+                                    spread_weight = std::max<float>(0.0, spread_weight);
+
                                     #pragma omp atomic update
-                                    num_flame_recv[dx, dy] += num_flame_gen[sx, sy];
+                                    num_flame_recv[dx, dy] += num_flame_gen[sx, sy] * spread_weight;
 
                                     num_flame_recv_sum_tick += 1;
                                 }

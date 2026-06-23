@@ -337,6 +337,18 @@ def build_ast(tree: Tree, file: str):
             var_name = var_name.value
             return CreateFlames(var_name=var_name, dist=dist, pos=pos, children=[dist])
 
+        case "flame_spread_weight":
+            svar_name, dvar_name, weight = children
+            svar_name = svar_name.value
+            dvar_name = dvar_name.value
+            return FlameSpreadWeight(
+                svar_name=svar_name,
+                dvar_name=dvar_name,
+                weight=weight,
+                pos=pos,
+                children=[weight],
+            )
+
         case "flame_ignition_prob":
             var_name, prob = children
             var_name = var_name.value
@@ -355,6 +367,7 @@ def build_ast(tree: Tree, file: str):
             ember_death_prob = None
             ember_ignition_prob = None
             create_flames = None
+            flame_spread_weight = None
             flame_ignition_prob = None
             burn_time = None
 
@@ -395,6 +408,13 @@ def build_ast(tree: Tree, file: str):
                                 pos=child.pos,
                             )
                         create_flames = child
+                    case FlameSpreadWeight():
+                        if flame_spread_weight is not None:
+                            raise ParseError(
+                                "flame-spread-weight has been defined multiple times",
+                                pos=child.pos,
+                            )
+                        flame_spread_weight = child
                     case FlameIgnitionProb():
                         if flame_ignition_prob is not None:
                             raise ParseError(
@@ -437,6 +457,8 @@ def build_ast(tree: Tree, file: str):
                     "create-flames has not been defined",
                     pos=pos,
                 )
+            if flame_spread_weight is None:
+                raise ParseError("flame-spread-weight has not been defined", pos=pos)
             if flame_ignition_prob is None:
                 raise ParseError(
                     "flame-ignition-prob has not been defined",
@@ -454,6 +476,7 @@ def build_ast(tree: Tree, file: str):
                 ember_death_prob=ember_death_prob,
                 ember_ignition_prob=ember_ignition_prob,
                 create_flames=create_flames,
+                flame_spread_weight=flame_spread_weight,
                 flame_ignition_prob=flame_ignition_prob,
                 burn_time=burn_time,
                 pos=pos,
@@ -577,7 +600,7 @@ def build_scope(node: AstNode, scope: ChainMap[str, Any]):
             obj.scope = scope
             obj.scope[obj.var_name] = BuiltinObject(obj.var_name, "tile")
 
-        case EmberJumpLikelihood() | EmberDeathProb() as obj:
+        case EmberJumpLikelihood() | EmberDeathProb() | FlameSpreadWeight() as obj:
             scope = scope.new_child()
 
             obj.scope = scope
@@ -633,7 +656,7 @@ def populate_tile_objects(node: AstNode, tile_data: TileData):
             for tile_var in tile_data.tile_vars:
                 ref.attrs[tile_var.name] = tile_var
 
-        case EmberJumpLikelihood() | EmberDeathProb() as obj:
+        case EmberJumpLikelihood() | EmberDeathProb() | FlameSpreadWeight() as obj:
             assert obj.scope is not None
             for var_name in [obj.svar_name, obj.dvar_name]:
                 ref: BuiltinObject = obj.scope[var_name]

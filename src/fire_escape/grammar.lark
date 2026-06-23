@@ -73,14 +73,18 @@ fire_model: "fire-model" ":" _NEWLINE _INDENT model_expr+ _DEDENT
     | ember_ignition_prob
     | create_flames
     | flame_ignition_prob
+    | flame_spread_weight
     | burn_time
 
 create_embers: "create-embers" "(" CNAME ")" ":" poisson_dist _NEWLINE
 ember_jump_likelihood: "ember-jump-likelihood" "(" CNAME "," CNAME ")" ":" expression _NEWLINE
 ember_death_prob: "ember-death-prob" "(" CNAME "," CNAME ")" ":" expression _NEWLINE
 ember_ignition_prob: "ember-ignition-prob" "(" CNAME ")" ":" expression _NEWLINE
+
 create_flames: "create-flames" "(" CNAME ")" ":" deterministic_dist _NEWLINE
+flame_spread_weight: "flame-spread-weight" "(" CNAME "," CNAME ")" ":" expression _NEWLINE
 flame_ignition_prob: "flame-ignition-prob" "(" CNAME ")" ":" expression _NEWLINE
+
 burn_time: "burn-time" "(" CNAME ")" ":" normal_dist _NEWLINE
 
 poisson_dist: "poisson" "[" expression "]"

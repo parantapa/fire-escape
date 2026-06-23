@@ -27,8 +27,11 @@ fire-model:
     ember-jump-likelihood(s, d) : ember_jump_likelihood(s.pos, d.pos)
     ember-death-prob(s, d) : ember_death_prob(s.pos, d.pos)
     ember-ignition-prob(t) : ignition_prob(t.fuel, t.moisture)
+
     create-flames(t) : deterministic[1.0]
+    flame-spread-weight(s, d) : 1.0 # flame_spread_likelihood(s.pos, d.pos)
     flame-ignition-prob(t) : ignition_prob(t.fuel, t.moisture)
+
     burn-time(t) : normal[t.burn_time * 20, 1.0]
 
 def ember_creation_rate(fuel: float, moisture: float) -> float:
