@@ -378,12 +378,7 @@ def codegen(node: AstNode | tuple[AstNode, str]) -> str:
     raise CompilerError(f"unexpected node type {node=}")
 
 
-@click.group()
-def openmp_cpu():
-    """Code generator for OpenMP CPU backend."""
-
-
-@openmp_cpu.command()
+@click.command(name="compile")
 @click.option(
     "-i",
     "--input-file",
@@ -398,7 +393,7 @@ def openmp_cpu():
     type=click.Path(exists=False, file_okay=False, dir_okay=True, path_type=Path),
     help="C++ project directory.",
 )
-def compile(input_file: Path, output_dir: Path):
+def compile_cmd(input_file: Path, output_dir: Path):
     """Compile the FFSL code to a C++ project."""
     output_dir.mkdir(exist_ok=True, parents=True, mode=0o755)
     source = parse(str(input_file), input_file.read_text())

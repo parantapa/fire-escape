@@ -28,7 +28,7 @@ This installs the `ffsc` command line tool.
 ### 1. Compile a model to a C++ project
 
 ```
-ffsc openmp-cpu compile -i examples/example1.ffsl -o build/sim
+ffsc compile -i examples/example1.ffsl -o build/sim
 ```
 
 This writes three files into the output directory:

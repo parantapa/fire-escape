@@ -2,7 +2,7 @@
 
 import click
 
-from .codegen_openmp_cpu import openmp_cpu
+from .codegen_openmp_cpu import compile_cmd
 
 
 @click.group()
@@ -10,7 +10,7 @@ def cli():
     """Forest fire simulator language (FFSL) compiler."""
 
 
-cli.add_command(openmp_cpu)
+cli.add_command(compile_cmd)
 
 
 def main():
