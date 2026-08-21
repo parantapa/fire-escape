@@ -212,8 +212,8 @@ thread_state->{{ name }}_start_time[CUR_TICK] = Clock::now();
 thread_state->{{ name }}_duration[CUR_TICK] += Duration(Clock::now() - thread_state->{{ name }}_start_time[CUR_TICK]).count();
 {% endmacro %}
 
-{% for opt in source.options %}
-constexpr std::int32_t {{ opt.name | upper }} = {{ opt.value }};
+{% for opt_name, opt_value in source.opts.items() %}
+constexpr std::int32_t {{ opt_name | upper }} = {{ opt_value }};
 {% endfor %}
 
 static std::int32_t NUM_TICKS = 0;
@@ -222,7 +222,7 @@ static std::int32_t NUM_COLS = 0;
 static std::int32_t CUR_TICK = 0;
 
 static inline bool is_valid_position(std::int32_t x, std::int32_t y) {
-    return x >= 0 && x < NUM_ROWS && y >= 0 && y <= NUM_COLS;
+    return x >= 0 && x < NUM_ROWS && y >= 0 && y < NUM_COLS;
 }
 
 {% for cfg in source.configs %}
@@ -766,7 +766,7 @@ static void execute_tick() {
                         {{ source.tile_data.state_var.name | mangle }}[x, y] = Burning;
                         change_time[x, y] = CUR_TICK + burn_time;
                     } else {
-                        thread_state->log_prob += std::logf(1.0 - ember_ignition_prob);
+                        thread_state->log_prob += std::logf(1.0 - ignition_prob);
                     }
                 }
             }
@@ -806,7 +806,7 @@ static void execute_tick() {
 
     num_unburned[CUR_TICK] = num_unburned_tick;
     num_burning[CUR_TICK] = num_burning_tick;
-    num_burnt_out[CUR_TICK] = num_burning_tick;
+    num_burnt_out[CUR_TICK] = num_burnt_out_tick;
     num_ember_gen_sum[CUR_TICK] = num_ember_gen_sum_tick;
     num_ember_recv_sum[CUR_TICK] = num_ember_recv_sum_tick;
     num_flame_gen_sum[CUR_TICK] = num_flame_gen_sum_tick;
