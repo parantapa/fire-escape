@@ -26,6 +26,15 @@ dependencies = [
     "json5"
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "pyright",
+    "h5py",
+    "polars"
+]
+
 [project.urls]
 "Homepage" = "https://github.com/parantapa/fire-escape"
 
