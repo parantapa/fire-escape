@@ -1,14 +1,16 @@
 """Code generation."""
 
+import math
 from pathlib import Path
 
 import click
 import jinja2
 
 from .parser import parse
+from .type_check import get_type
 from .ast_nodes import *
 from .builtins import *
-from .error import CompilerError
+from .error import CodeError, CompilerError, Position
 from .templates import load_template
 
 ENVIRONMENT = jinja2.Environment(
@@ -78,52 +80,19 @@ TYPE_TO_H5TYPE = {
     "fire_state": "H5::PredType::NATIVE_INT8",
 }
 
-TYPE_TO_ARROW_TYPE = {
-    "int":   "arrow::int32()",
-    "uint":  "arrow::uint32()",
-    "float": "arrow::float32()",
-    "bool":  "arrow::boolean()",
-
-    "u8":  "arrow::uint8()",
-    "u16": "arrow::uint16()",
-    "u32": "arrow::uint32()",
-    "u64": "arrow::uint64()",
-
-    "i8":  "arrow::int8()",
-    "i16": "arrow::int16()",
-    "i32": "arrow::int32()",
-    "i64": "arrow::int64()",
-
-    "f32": "arrow::float32()",
-    "f64": "arrow::float64()",
-}
-
-TYPE_TO_ARROW_ARRAY_TYPE = {
-    "int":   "arrow::Int32Array",
-    "uint":  "arrow::UInt32Array",
-    "float": "arrow::FloatArray",
-    "bool":  "arrow::BooleanArray",
-
-    "u8":  "arrow::UInt8Array",
-    "u16": "arrow::UInt16Array",
-    "u32": "arrow::UInt32Array",
-    "u64": "arrow::UInt64Array",
-
-    "i8":  "arrow::Int8Array",
-    "i16": "arrow::Int16Array",
-    "i32": "arrow::Int32Array",
-    "i64": "arrow::Int64Array",
-
-    "f32": "arrow::FloatArray",
-    "f64": "arrow::DoubleArray",
-}
-
 BUILTIN_FN_NAME = {
-    "exp": "std::exp",
+    "exp": "std::expf",
     "alignment": "alignment",
     "distance": "distance"
 }
 # fmt: on
+
+
+# C++ types that already divide in floating point.
+FLOAT_CTYPES = frozenset(["float", "double"])
+
+# Largest finite magnitude of an IEEE 754 binary32 value.
+FLT_MAX = 3.4028234663852886e38
 
 
 def cpp_type(name: str) -> str:
@@ -138,20 +107,6 @@ def h5_type(name: str) -> str:
 
 
 ENVIRONMENT.filters["h5_type"] = h5_type
-
-
-def arrow_type(name: str) -> str:
-    return TYPE_TO_ARROW_TYPE[name]
-
-
-ENVIRONMENT.filters["arrow_type"] = arrow_type
-
-
-def arrow_array_type(name: str) -> str:
-    return TYPE_TO_ARROW_ARRAY_TYPE[name]
-
-
-ENVIRONMENT.filters["arrow_array_type"] = arrow_array_type
 
 
 # Hack required for argparse, which doesn't handle floats well yet.
@@ -175,6 +130,28 @@ def cpp_init(name: str) -> str:
 ENVIRONMENT.filters["cpp_init"] = cpp_init
 
 
+def cpp_float_literal(value: float, pos: Position) -> str:
+    """Render a Python float as a C++ float literal.
+
+    An unsuffixed C++ floating literal has type double,
+    which would pull the surrounding expression into double precision.
+    Python's repr always produces either a decimal point or an exponent,
+    so appending an `f` suffix is enough to make the literal well formed.
+    """
+    if not math.isfinite(value):
+        raise CodeError(f"Float literal {value!r} is not a finite number", pos=pos)
+
+    if abs(value) > FLT_MAX:
+        raise CodeError(
+            f"Float literal {value!r} is out of range for a 32 bit float",
+            pos=pos,
+        )
+
+    text = repr(value)
+    assert "." in text or "e" in text or "E" in text
+    return text + "f"
+
+
 def codegen_expr(node: AstNode) -> str:
     match node:
         case Bool() as lit:
@@ -182,7 +159,7 @@ def codegen_expr(node: AstNode) -> str:
         case Int() as lit:
             return str(lit.value)
         case Float() as lit:
-            return str(lit.value)
+            return cpp_float_literal(lit.value, lit.pos)
         case Str() as lit:
             return '"' + lit.value + '"'
         case Ref() as ref:
@@ -190,7 +167,10 @@ def codegen_expr(node: AstNode) -> str:
                 case [LocalVariable() | Parameter() as obj]:
                     return mangle(obj.name)
                 case [Config() as obj]:
-                    return mangle(obj.name)
+                    ctype = cpp_type(obj.type.name)
+                    if ctype == cpp_type_config(obj.type.name):
+                        return mangle(obj.name)
+                    return f"static_cast<{ctype}>({mangle(obj.name)})"
                 case [TickVar() as obj]:
                     return mangle(obj.name) + "[CUR_TICK]"
                 case [Func() as fn]:
@@ -221,11 +201,18 @@ def codegen_expr(node: AstNode) -> str:
         case UnaryExpr(op=op, arg=arg):
             arg = codegen_expr(arg)
             return f"( {op} {arg} )"
-        case BinaryExpr(left=left, op=op, right=right):
-            left = codegen_expr(left)
-            right = codegen_expr(right)
+        case BinaryExpr(left=lexpr, op=op, right=rexpr):
+            left = codegen_expr(lexpr)
+            right = codegen_expr(rexpr)
             if op == "**":
-                return f"std::pow( {left}, {right} )"
+                return f"std::powf( {left}, {right} )"
+            elif op == "/":
+                # `/` is true division, as in Python.
+                # C++ would divide two integral operands as integers,
+                # so the left operand is converted first.
+                if cpp_type(get_type(lexpr)) not in FLOAT_CTYPES:
+                    left = f"float( {left} )"
+                return f"( {left} / {right} )"
             else:
                 return f"( {left} {op} {right} )"
         case FuncCall(func=func, args=args):
@@ -370,7 +357,9 @@ def codegen(node: AstNode | tuple[AstNode, str]) -> str:
             new_lines = []
             for i, line in enumerate(lines, 1):
                 if line.strip() == "#endline":
-                    line = line.replace("#endline", f'#line {i} "simulator.cpp"')
+                    # `#line N` numbers the line after the directive,
+                    # and the directive itself sits on line i.
+                    line = line.replace("#endline", f'#line {i + 1} "simulator.cpp"')
                 new_lines.append(line)
 
             return "\n".join(new_lines)

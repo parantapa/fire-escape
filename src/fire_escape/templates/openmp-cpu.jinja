@@ -67,9 +67,16 @@ static inline {{ rtype }} {{ name }}( {{ ptypes | join(", ") }} ) ;
 {#- name: "simulator.cpp" -#}
 #include <cmath>
 #include <cstdint>
+#include <iostream>
+#include <limits>
 #include <random>
 #include <numbers>
 #include <chrono>
+#include <stdexcept>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
 #include <experimental/mdspan>
 #include <experimental/scope>
 
@@ -101,9 +108,14 @@ constexpr fire_state_t BurntOut = 2;
 using Rng = r123::Philox4x32;
 using RngEngine = r123::Engine<Rng>;
 
-using tick_extents_t = stdex::dextents<std::int32_t, 1>;
-using tile_extents_t = stdex::dextents<std::int32_t, 2>;
-using jump_extents_t = stdex::dextents<std::int32_t, 4>;
+// The mdspan index type is 64 bits wide
+// because a 32 bit offset computation wraps at realistic grid sizes.
+// A 4096 x 4096 grid with max_jump 8 holds 4,848,615,424 jump entries,
+// and the wrap point sits near a 2730 x 2730 grid.
+// Every allocation below counts elements in std::size_t for the same reason.
+using tick_extents_t = stdex::dextents<std::int64_t, 1>;
+using tile_extents_t = stdex::dextents<std::int64_t, 2>;
+using jump_extents_t = stdex::dextents<std::int64_t, 4>;
 
 static inline float distance(Position a, Position b) {
     return std::hypotf(a.x - b.x, a.y - b.y);
@@ -114,6 +126,14 @@ static inline float alignment(Position a, Position b, float direction) {
     float dy = -(b.y - a.y);
 
     float d_abs = std::hypotf(dx, dy);
+
+    // Two coincident positions carry no direction to project onto the heading.
+    // The neighborhood of a source tile always includes the source itself,
+    // so this case is evaluated on every burning tile,
+    // and dividing by zero would push a NaN into the model.
+    if (d_abs == 0.0f) {
+        return 0.0f;
+    }
 
     float wx = std::sinf(direction * std::numbers::pi / 180.0);
     float wy = std::cosf(direction * std::numbers::pi / 180.0);
@@ -150,6 +170,15 @@ static inline float sample_normal(RngEngine& rng) {
 
 static inline float normal_log_prob(float x) {
     return -(x * x + std::logf(std::numbers::pi) + std::logf(2.0)) / 2.0;
+}
+
+// Log density of a normal variate that was drawn
+// by scaling a standard normal sample z by std and then shifting it by mean.
+// The change of variables contributes the -log(std) Jacobian term,
+// without which the reported value scores the standard normal
+// instead of the distribution the model declared.
+static inline float normal_log_prob_scaled(float z, float std) {
+    return normal_log_prob(z) - std::logf(std);
 }
 
 static inline std::int32_t sample_poisson(RngEngine& rng, float rate) {
@@ -372,10 +401,14 @@ static void init_change_time() {
                 if ({{ source.tile_data.state_var.name | mangle }}[x, y] == Burning) {
                     float burn_time_mean = {{ source.fire_model.burn_time.dist.mean | codegen_expr }};
                     float burn_time_std = {{ source.fire_model.burn_time.dist.std | codegen_expr }};
-                    float burn_time = sample_normal(thread_state->rng);
-                    thread_state->log_prob += normal_log_prob(burn_time);
+                    float burn_time_z = sample_normal(thread_state->rng);
+                    thread_state->log_prob += normal_log_prob_scaled(burn_time_z, burn_time_std);
 
-                    burn_time = burn_time * burn_time_mean + burn_time_std;
+                    // A standard normal sample is scaled by the standard deviation
+                    // and then shifted by the mean.
+                    // The clamp and the rounding below turn the draw into a tick count
+                    // and are not part of the scored density.
+                    float burn_time = burn_time_z * burn_time_std + burn_time_mean;
                     burn_time = std::max<float>(0, burn_time);
                     burn_time = std::roundf(burn_time);
 
@@ -388,11 +421,120 @@ static void init_change_time() {
     }
 }
 
+// One column of tick data, copied out of an Arrow record batch.
+// The values live in plain vectors,
+// so the code that fills the tick arrays does not need to know
+// which Arrow type the Parquet file actually held.
+template <typename ValueType>
+struct TickColumn {
+    std::vector<ValueType> value;
+    std::vector<bool> valid;
+};
+
+// Reports whether an Arrow value can be represented by the declared tick type.
+// A Parquet file written by the usual pandas or polars pipeline
+// stores a float column as double and an int column as int64,
+// so the common case is a wider source type that still holds a small value.
+template <typename ValueType, typename SourceType>
+static inline bool tick_value_fits(SourceType in) {
+    if constexpr (std::is_same_v<ValueType, SourceType>) {
+        return true;
+    } else if constexpr (std::is_same_v<ValueType, bool> || std::is_same_v<SourceType, bool>) {
+        return true;
+    } else if constexpr (std::is_floating_point_v<ValueType>) {
+        if constexpr (std::is_floating_point_v<SourceType>) {
+            // A finite double outside the float range would become an infinity.
+            return !std::isfinite(in) || std::fabs(in) <= double(std::numeric_limits<ValueType>::max());
+        } else {
+            // An integer always converts to a floating point type.
+            // A large integer loses precision, and that is accepted.
+            return true;
+        }
+    } else if constexpr (std::is_floating_point_v<SourceType>) {
+        // A floating point column is never truncated into an integer tick variable.
+        return false;
+    } else {
+        // The comparison helpers handle a mix of signed and unsigned correctly.
+        return std::cmp_greater_equal(in, std::numeric_limits<ValueType>::lowest())
+            && std::cmp_less_equal(in, std::numeric_limits<ValueType>::max());
+    }
+}
+
+// Copies one Arrow array into a tick column, converting every valid value.
+template <typename ValueType, typename SourceArrayType>
+static arrow::Status copy_tick_column(const std::string& name,
+                                      const std::shared_ptr<arrow::Array>& arr,
+                                      TickColumn<ValueType>& out) {
+    const auto& col = static_cast<const SourceArrayType&>(*arr);
+    for (std::int64_t i = 0; i < col.length(); i++) {
+        if (!col.IsValid(i)) {
+            continue;
+        }
+
+        auto in = col.Value(i);
+        if (!tick_value_fits<ValueType>(in)) {
+            return arrow::Status::Invalid(fmt::format(
+                "Column '{}' row {} holds a value that the declared type cannot represent", name, i));
+        }
+
+        out.value[i] = static_cast<ValueType>(in);
+        out.valid[i] = true;
+    }
+
+    return arrow::Status::OK();
+}
+
+// Reads one column of the tick file into the type the model declared.
+// An exact type match is copied straight across,
+// and any other numeric type is converted when every value fits,
+// so a file holding double or int64 columns is read rather than rejected.
+template <typename ValueType>
+static arrow::Status read_tick_column(const std::string& name,
+                                      const std::shared_ptr<arrow::RecordBatch>& batch,
+                                      TickColumn<ValueType>& out) {
+    auto arr = batch->GetColumnByName(name);
+    if (!arr) {
+        return arrow::Status::Invalid(fmt::format("Column '{}' not found", name));
+    }
+
+    out.value.assign(std::size_t(arr->length()), ValueType(0));
+    out.valid.assign(std::size_t(arr->length()), false);
+
+    switch (arr->type_id()) {
+    case arrow::Type::BOOL:
+        return copy_tick_column<ValueType, arrow::BooleanArray>(name, arr, out);
+    case arrow::Type::INT8:
+        return copy_tick_column<ValueType, arrow::Int8Array>(name, arr, out);
+    case arrow::Type::INT16:
+        return copy_tick_column<ValueType, arrow::Int16Array>(name, arr, out);
+    case arrow::Type::INT32:
+        return copy_tick_column<ValueType, arrow::Int32Array>(name, arr, out);
+    case arrow::Type::INT64:
+        return copy_tick_column<ValueType, arrow::Int64Array>(name, arr, out);
+    case arrow::Type::UINT8:
+        return copy_tick_column<ValueType, arrow::UInt8Array>(name, arr, out);
+    case arrow::Type::UINT16:
+        return copy_tick_column<ValueType, arrow::UInt16Array>(name, arr, out);
+    case arrow::Type::UINT32:
+        return copy_tick_column<ValueType, arrow::UInt32Array>(name, arr, out);
+    case arrow::Type::UINT64:
+        return copy_tick_column<ValueType, arrow::UInt64Array>(name, arr, out);
+    case arrow::Type::FLOAT:
+        return copy_tick_column<ValueType, arrow::FloatArray>(name, arr, out);
+    case arrow::Type::DOUBLE:
+        return copy_tick_column<ValueType, arrow::DoubleArray>(name, arr, out);
+    default:
+        return arrow::Status::Invalid(fmt::format(
+            "Column '{}' has type {}, which the simulator cannot read as a number",
+            name, arr->type()->ToString()));
+    }
+}
+
 static arrow::Status load_tick_data(const std::string& file_name) {
     arrow::MemoryPool* pool = arrow::default_memory_pool();
 
     auto reader_properties = parquet::ReaderProperties(pool);
-    reader_properties.set_buffer_size(64 * 1025 * 1024);
+    reader_properties.set_buffer_size(64 * 1024 * 1024);
     reader_properties.enable_buffered_stream();
 
     auto arrow_reader_props = parquet::ArrowReaderProperties();
@@ -415,27 +557,19 @@ static arrow::Status load_tick_data(const std::string& file_name) {
 	auto num_rows = batch->num_rows();
 
         {% for var in source.tick_data.tick_vars %}
-        auto {{ var.name | mangle }}_type = {{ var.type.name | arrow_type }};
-        auto {{ var.name | mangle }}_arr = batch->GetColumnByName("{{ var.name }}");
-        if (!{{ var.name | mangle }}_arr) {
-            throw std::runtime_error("Column '{{ var.name }}' not found");
-        }
-        if (!{{ var.name | mangle }}_arr->type()->Equals({{ var.name | mangle }}_type)) {
-            throw std::runtime_error(fmt::format("Column '{{ var.name }}' of unexpected type: expected = {}, got = {}",
-                {{ var.name | mangle }}_type->ToString(), {{ var.name | mangle }}_arr->type()->ToString()));
-        }
-        auto {{ var.name | mangle }}_col = std::dynamic_pointer_cast<{{ var.type.name | arrow_array_type }}>({{ var.name | mangle }}_arr);
+        TickColumn<{{ var.type.name | cpp_type }}> {{ var.name | mangle }}_col;
+        ARROW_RETURN_NOT_OK(read_tick_column("{{ var.name }}", batch, {{ var.name | mangle }}_col));
 
         {% endfor %}
 
-        for (std::int32_t i = 0; i < num_rows; i++) {
-            if ({{ source.tick_data.key_var.name | mangle }}_col->IsValid(i)) {
-                std::int32_t tick = {{ source.tick_data.key_var.name | mangle }}_col->Value(i);
+        for (std::int64_t i = 0; i < num_rows; i++) {
+            if ({{ source.tick_data.key_var.name | mangle }}_col.valid[i]) {
+                std::int64_t tick = {{ source.tick_data.key_var.name | mangle }}_col.value[i];
                 if (tick >= 0 && tick < NUM_TICKS) {
                     {% for var in source.tick_data.tick_vars %}
                     {% if var.is_real %}
-                    if ({{ var.name | mangle }}_col->IsValid(i)) {
-                        {{ var.name | mangle }}[tick] = {{ var.name | mangle }}_col->Value(i);
+                    if ({{ var.name | mangle }}_col.valid[i]) {
+                        {{ var.name | mangle }}[tick] = {{ var.name | mangle }}_col.value[i];
                     }
                     {% endif %}
                     {% endfor %}
@@ -549,7 +683,12 @@ static void execute_tick() {
         // Reset for tick
         {{ tick_thread_phase_begin("reset_for_tick") }}
 
-        {% set tile_vars_to_reset = ["num_ember_gen", "num_ember_recv"] %}
+        // Every tile array that a tick fills from scratch is zeroed here.
+        // num_flame_gen is written only for a tile that is burning right now,
+        // so a stale value would keep spreading flame from a tile that burnt out,
+        // and num_flame_recv would otherwise accumulate over the whole run.
+        // change_time is deliberately absent, because it carries across ticks.
+        {% set tile_vars_to_reset = ["num_ember_gen", "num_flame_gen", "num_ember_recv", "num_flame_recv"] %}
         {% for name in tile_vars_to_reset %}
         #pragma omp for simd collapse(2) schedule(static) nowait
         for (std::int32_t x = 0; x < NUM_ROWS; x++) {
@@ -581,6 +720,18 @@ static void execute_tick() {
         }
 
         {% endfor %}
+
+        // The loops above keep nowait because they write disjoint arrays,
+        // so a thread may run ahead into the next reset loop without harm.
+        // This barrier is required all the same.
+        // An omp for synchronizes only at its own end,
+        // and the reset loops are static while the phases below are guided,
+        // so without it a thread could enter create_embers
+        // and write num_ember_gen for a tile
+        // whose reset chunk still belongs to a thread that is resetting,
+        // and that reset would then zero the fresh value.
+        // The same race holds for jump_like against compute_jump_dist.
+        #pragma omp barrier
 
         {{ tick_thread_phase_end("reset_for_tick") }}
 
@@ -756,10 +907,14 @@ static void execute_tick() {
 
                         float burn_time_mean = {{ source.fire_model.burn_time.dist.mean | codegen_expr }};
                         float burn_time_std = {{ source.fire_model.burn_time.dist.std | codegen_expr }};
-                        float burn_time = sample_normal(thread_state->rng);
-                        thread_state->log_prob += normal_log_prob(burn_time);
+                        float burn_time_z = sample_normal(thread_state->rng);
+                        thread_state->log_prob += normal_log_prob_scaled(burn_time_z, burn_time_std);
 
-                        burn_time = burn_time * burn_time_mean + burn_time_std;
+                        // A standard normal sample is scaled by the standard deviation
+                        // and then shifted by the mean.
+                        // The clamp and the rounding below turn the draw into a tick count
+                        // and are not part of the scored density.
+                        float burn_time = burn_time_z * burn_time_std + burn_time_mean;
                         burn_time = std::max<float>(0, burn_time);
                         burn_time = std::roundf(burn_time);
 
@@ -813,6 +968,21 @@ static void execute_tick() {
     num_flame_recv_sum[CUR_TICK] = num_flame_recv_sum_tick;
 }
 
+// Creates the output file before the run starts.
+// An unwritable or invalid path has to fail here,
+// because the alternative is a failure after a simulation that is then lost.
+// The file is truncated rather than opened in place,
+// so a second run into the same path overwrites the first one
+// instead of tripping over the datasets it left behind.
+static H5::H5File create_output_file(const std::string& file_name) {
+    try {
+        return H5::H5File(file_name, H5F_ACC_TRUNC);
+    } catch (const H5::Exception& err) {
+        throw std::runtime_error(
+            fmt::format("Failed to create output file '{}': {}", file_name, err.getDetailMsg()));
+    }
+}
+
 static void main_loop(H5::H5File& file) {
     std::array<hsize_t, 3> full_dims = {hsize_t(NUM_TICKS), hsize_t(NUM_ROWS), hsize_t(NUM_COLS)};
     auto file_space = H5::DataSpace(full_dims.size(), full_dims.data());
@@ -860,6 +1030,7 @@ int main(int argc, char *argv[]) {
     std::string seed_file_name = "";
     std::string tick_file_name = "";
     std::string output_file_name = "";
+    std::int64_t seed_arg = -1;
 
     {% macro add_argument(short_opt, long_opt, help, var) -%}
     program.add_argument("{{ short_opt }}", "{{ long_opt }}")
@@ -876,6 +1047,11 @@ int main(int argc, char *argv[]) {
     {{ add_argument("-s", "--seed-file", "Seed data file (HDF5).", "seed_file_name") }}
     {{ add_argument("-w", "--tick-file", "Tick data file (Parquet).", "tick_file_name") }}
     {{ add_argument("-o", "--output-file", "Output file (HDF5).", "output_file_name") }}
+
+    program.add_argument("--seed")
+        .default_value(std::int64_t(-1))
+        .help("RNG seed. A negative value draws a fresh seed from the system.")
+        .store_into(seed_arg);
 
     {% for cfg in source.configs %}
     program.add_argument("--config-{{ cfg.name | replace("_", "-") }}")
@@ -906,41 +1082,81 @@ int main(int argc, char *argv[]) {
     fmt::println("{{ cfg.name }} = {}", {{ cfg.name | mangle }});
     {% endfor %}
 
+    if (seed_arg > std::int64_t(std::numeric_limits<std::uint32_t>::max())) {
+        throw std::runtime_error(fmt::format("Seed {} does not fit in 32 bits", seed_arg));
+    }
+
+    std::uint32_t seed = 0;
+    if (seed_arg < 0) {
+        std::random_device rnd_device;
+        seed = rnd_device();
+    } else {
+        seed = std::uint32_t(seed_arg);
+    }
+
+    // The team size must stay the same across every parallel region.
+    // thread_state is threadprivate and is allocated once below,
+    // so a later region with a larger team would find a null pointer.
+    omp_set_dynamic(0);
+
+    // The seed and the team size together identify the draws of a run,
+    // so both are echoed and the seed is written to the output file.
+    // A run on one thread repeats exactly from its seed.
+    // A run on several threads repeats only as far as the guided schedule
+    // hands the same tiles to the same threads,
+    // because every thread draws from a stream of its own.
+    fmt::println("seed = {}", seed);
+    fmt::println("num_threads = {}", omp_get_max_threads());
+
+    auto output_file = create_output_file(output_file_name);
+
     double total_alloc_bytes = 0.0;
 
+    // Element counts are computed in std::size_t.
+    // The jump arrays hold 4,848,615,424 elements on a 4096 x 4096 grid
+    // with a maximum jump of 8,
+    // which wraps to 553,648,128 in 32 bit arithmetic,
+    // and the allocation would then succeed at a fraction of the size
+    // while the mdspan still reported the full extents.
+    // Each mdspan is built with its declared type rather than a deduced one,
+    // so the extents keep their 64 bit index type.
     {% for name, type in tick_vars %}
-    auto {{ name }}_count = NUM_TICKS;
+    std::size_t {{ name }}_count = std::size_t(NUM_TICKS);
     {{ type }}* {{ name }}_mem = new {{ type  }}[{{ name }}_count];
     auto {{ name  }}_free = stdex::scope_exit([=]() { delete[] {{ name }}_mem; });
-    {{ name }} = stdex::mdspan({{ name }}_mem, NUM_TICKS);
+    {{ name }} = stdex::mdspan<{{ type }}, tick_extents_t>({{ name }}_mem, NUM_TICKS);
     total_alloc_bytes += {{ name }}_count * sizeof({{ type }});
 
     {% endfor %}
 
     {% for name, type in tile_vars %}
-    auto {{ name }}_count = NUM_ROWS * NUM_COLS;
+    std::size_t {{ name }}_count = std::size_t(NUM_ROWS) * std::size_t(NUM_COLS);
     {{ type }}* {{ name }}_mem = new {{ type  }}[{{ name }}_count];
     auto {{ name  }}_free = stdex::scope_exit([=]() { delete[] {{ name }}_mem; });
-    {{ name }} = stdex::mdspan({{ name }}_mem, NUM_ROWS, NUM_COLS);
+    {{ name }} = stdex::mdspan<{{ type }}, tile_extents_t>({{ name }}_mem, NUM_ROWS, NUM_COLS);
     total_alloc_bytes +=  {{ name }}_count * sizeof({{ type }});
 
     {% endfor %}
 
     {% for name, type in jump_vars %}
-    auto {{ name }}_count = NUM_ROWS * NUM_COLS * (2 * MAX_JUMP_X + 1) * (2 * MAX_JUMP_Y + 1);
+    std::size_t {{ name }}_count = std::size_t(NUM_ROWS) * std::size_t(NUM_COLS)
+        * std::size_t(2 * MAX_JUMP_X + 1) * std::size_t(2 * MAX_JUMP_Y + 1);
     {{ type }}* {{ name }}_mem = new {{ type  }}[{{ name }}_count];
     auto {{ name  }}_free = stdex::scope_exit([=]() { delete[] {{ name }}_mem; });
-    {{ name }} = stdex::mdspan({{ name }}_mem, NUM_ROWS, NUM_COLS, 2 * MAX_JUMP_X + 1, 2 * MAX_JUMP_Y + 1);
+    {{ name }} = stdex::mdspan<{{ type }}, jump_extents_t>({{ name }}_mem, NUM_ROWS, NUM_COLS, 2 * MAX_JUMP_X + 1, 2 * MAX_JUMP_Y + 1);
     total_alloc_bytes +=  {{ name }}_count * sizeof({{ type }});
 
     {% endfor %}
 
-    std::random_device rnd_device;
-    auto seed = rnd_device();
     #pragma omp parallel
     #pragma omp critical
     {
         thread_state = new ThreadState();
+
+        // Philox takes a two word key.
+        // The run seed and the thread number fill one word each,
+        // so every thread draws from a stream of its own
+        // that the same seed reproduces.
         thread_state->rng = RngEngine({ {seed, unsigned(omp_get_thread_num())} });
         thread_state->log_prob = 0.0;
 
@@ -976,8 +1192,6 @@ int main(int argc, char *argv[]) {
 
     init_change_time();
     {{ proc_phase_end("init") }}
-
-    H5::H5File output_file(output_file_name, H5F_ACC_CREAT | H5F_ACC_RDWR);
 
     {{ proc_phase_begin("main") }}
     main_loop(output_file);
@@ -1023,6 +1237,7 @@ int main(int argc, char *argv[]) {
     }
     {% endmacro %}
 
+    {{ save_run_stat("seed", "seed", "H5::PredType::NATIVE_UINT32") }}
     {{ save_run_stat("total_alloc_bytes", "total_alloc_bytes", "H5::PredType::NATIVE_DOUBLE") }}
     {{ save_run_stat("log_prob", "log_prob", "H5::PredType::NATIVE_DOUBLE") }}
 
@@ -1068,7 +1283,6 @@ project(
 
 find_package(fmt REQUIRED)
 find_package(argparse REQUIRED)
-find_package(phmap REQUIRED)
 find_package(mdspan REQUIRED)
 find_package(random123 REQUIRED)
 find_package(Arrow REQUIRED)
@@ -1080,7 +1294,6 @@ target_link_libraries(simulator
     PRIVATE
     fmt::fmt
     argparse::argparse
-    phmap
     std::mdspan
     random123::random123
     HDF5::HDF5
@@ -1103,7 +1316,6 @@ class FireEscapeSimRecipe(ConanFile):
     def requirements(self):
         self.requires("fmt/12.2.0")
         self.requires("argparse/3.2")
-        self.requires("parallel-hashmap/2.0.0")
         self.requires("mdspan/0.6.0")
         self.requires("random123/1.14.0.pci")
         self.requires(

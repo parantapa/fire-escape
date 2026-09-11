@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -33,6 +34,19 @@ TICK_SERIES: dict[str, str] = {
 UNBURNED = 0
 BURNING = 1
 BURNT_OUT = 2
+
+
+class InputError(Exception):
+    """Raised when a file cannot be read far enough to keep checking.
+
+    The message says which file is at fault and what is wrong with it.
+    Callers turn it into a counted failure or into an ``error:`` line,
+    so it never reaches the user as a traceback.
+    """
+
+
+class ChecksAborted(Exception):
+    """Raised to stop a run whose failure is already counted as a check."""
 
 
 class Checker:
@@ -61,19 +75,51 @@ class Checker:
         return self.failed
 
 
-def read_dataset(node: h5py.File | h5py.Group, name: str) -> np.ndarray:
-    """Read a named HDF5 dataset fully into memory."""
+@dataclass(frozen=True)
+class Inputs:
+    """What the three input files say a run should look like."""
+
+    rows: int
+    cols: int
+    num_ticks: int
+    seed_state: np.ndarray
+    num_seed_burning: int
+
+
+@dataclass(frozen=True)
+class StateScan:
+    """Aggregates gathered in one pass over the saved state grids.
+
+    The pass holds one tick at a time,
+    so peak memory stays at two grids rather than the whole run.
+    """
+
+    states_in_range: bool
+    never_regresses: bool
+    seed_tiles_alight: bool
+    # Per tick counts of unburned, burning and burnt out tiles,
+    # with shape (3, num_ticks).
+    tallies: np.ndarray
+
+
+def open_dataset(node: h5py.File | h5py.Group, name: str) -> h5py.Dataset:
+    """Return a named HDF5 dataset without reading its contents."""
     dataset = node[name]
     if not isinstance(dataset, h5py.Dataset):
-        raise SystemExit(f"{node.file.filename}: {name} is not a dataset")
-    return np.asarray(dataset[...])
+        raise InputError(f"{node.file.filename}: {name} is not a dataset")
+    return dataset
+
+
+def read_dataset(node: h5py.File | h5py.Group, name: str) -> np.ndarray:
+    """Read a named HDF5 dataset fully into memory."""
+    return np.asarray(open_dataset(node, name)[...])
 
 
 def read_group(fobj: h5py.File, name: str) -> h5py.Group:
     """Read a named HDF5 group."""
     group = fobj[name]
     if not isinstance(group, h5py.Group):
-        raise SystemExit(f"{fobj.filename}: {name} is not a group")
+        raise InputError(f"{fobj.filename}: {name} is not a group")
     return group
 
 
@@ -94,21 +140,55 @@ def read_ticks(tick_file: Path) -> pl.DataFrame:
     return pl.read_parquet(tick_file)
 
 
+def tick_keys(ticks_frame: pl.DataFrame, tick_file: Path) -> np.ndarray:
+    """Return the sorted tick column of a tick frame.
+
+    The simulator drops any row whose tick falls outside the run,
+    which leaves those ticks with no wind at all.
+    A gapped or one based tick column would do that silently,
+    so the column is validated here rather than after the run.
+    """
+    if "tick" not in ticks_frame.columns:
+        raise InputError(
+            f"{tick_file}: no tick column (found {sorted(ticks_frame.columns)})"
+        )
+    ticks = np.sort(ticks_frame["tick"].to_numpy())
+    if ticks.size == 0:
+        raise InputError(f"{tick_file}: the tick column is empty")
+    expected = np.arange(ticks.size)
+    if not bool(np.array_equal(ticks, expected)):
+        raise InputError(
+            f"{tick_file}: the tick column is not 0 to {ticks.size - 1}"
+            f" without gaps or duplicates"
+            f" (it runs from {int(ticks[0])} to {int(ticks[-1])}"
+            f" over {ticks.size} rows)"
+        )
+    return ticks
+
+
 def tick_count(tick_file: Path) -> int:
     """Return the number of ticks described by the tick data file."""
-    ticks = read_ticks(tick_file)["tick"].to_numpy()
-    return int(ticks.max()) + 1
+    return int(tick_keys(read_ticks(tick_file), tick_file).size)
 
 
 def grid_shape(tile_file: Path) -> tuple[int, int]:
-    """Return the (rows, cols) shape shared by the tile datasets."""
+    """Return the (rows, cols) shape shared by the tile grids.
+
+    A tile file can also carry members the model never names,
+    such as coordinate arrays or groups,
+    so only the two dimensional datasets decide the grid shape.
+    """
     with h5py.File(tile_file, "r") as fobj:
-        shapes = {str(name): read_dataset(fobj, str(name)).shape for name in fobj}
+        shapes: dict[str, tuple[int, ...]] = {}
+        for name in fobj:
+            node = fobj[str(name)]
+            if isinstance(node, h5py.Dataset) and node.ndim == 2:
+                shapes[str(name)] = node.shape
     if not shapes:
-        raise SystemExit(f"{tile_file}: no datasets found")
+        raise InputError(f"{tile_file}: no two dimensional datasets found")
     distinct = set(shapes.values())
     if len(distinct) != 1:
-        raise SystemExit(f"{tile_file}: inconsistent tile shapes {shapes}")
+        raise InputError(f"{tile_file}: inconsistent tile shapes {shapes}")
     rows, cols = distinct.pop()
     return int(rows), int(cols)
 
@@ -133,9 +213,12 @@ def verify_inputs(
     tile_file: Path,
     seed_file: Path,
     tick_file: Path,
-) -> tuple[int, int, int]:
+) -> Inputs:
     """Check that the three input files agree with each other."""
-    rows, cols, num_ticks = read_dims(tile_file, tick_file)
+    rows, cols = grid_shape(tile_file)
+    ticks_frame = read_ticks(tick_file)
+    ticks = tick_keys(ticks_frame, tick_file)
+    num_ticks = int(ticks.size)
     ck.note(f"grid is {rows} x {cols}, {num_ticks} ticks")
 
     with h5py.File(tile_file, "r") as fobj:
@@ -147,7 +230,7 @@ def verify_inputs(
 
     with h5py.File(seed_file, "r") as fobj:
         if not ck.check("state" in fobj, "seed file holds the state dataset"):
-            raise SystemExit(1)
+            raise ChecksAborted
         seed_state = read_dataset(fobj, "state")
     ck.check(
         seed_state.shape == (rows, cols),
@@ -156,19 +239,23 @@ def verify_inputs(
     num_seed_burning = int((seed_state == BURNING).sum())
     ck.check(num_seed_burning > 0, f"seed file has burning tiles ({num_seed_burning})")
 
-    ticks_frame = read_ticks(tick_file)
     columns = set(ticks_frame.columns)
     ck.check(
         {"tick", "wind_speed", "wind_direction"} <= columns,
         f"tick file holds tick, wind_speed and wind_direction (found {sorted(columns)})",
     )
-    ticks = ticks_frame["tick"].sort().to_numpy()
     ck.check(
         bool(np.array_equal(ticks, np.arange(num_ticks))),
         f"tick keys cover 0 to {num_ticks - 1} without gaps or duplicates",
     )
 
-    return rows, cols, num_ticks
+    return Inputs(
+        rows=rows,
+        cols=cols,
+        num_ticks=num_ticks,
+        seed_state=seed_state,
+        num_seed_burning=num_seed_burning,
+    )
 
 
 def verify_structure(
@@ -177,17 +264,24 @@ def verify_structure(
     rows: int,
     cols: int,
     num_ticks: int,
-) -> tuple[np.ndarray | None, dict[str, np.ndarray]]:
-    """Check that the output file holds the datasets the model asked for."""
+) -> tuple[h5py.Dataset | None, dict[str, np.ndarray]]:
+    """Check that the output file holds the datasets the model asked for.
+
+    The state dataset comes back unread,
+    so that the later checks can walk it one tick at a time.
+    Only a series of the right length joins the returned mapping,
+    because the checks that follow compare it against every other series.
+    """
     names = set(fobj)
 
-    state: np.ndarray | None = None
+    state: h5py.Dataset | None = None
     if ck.check("state" in names, "output holds the saved state dataset"):
-        state = read_dataset(fobj, "state")
-        ck.check(
-            state.shape == (num_ticks, rows, cols),
-            f"state shape {state.shape} is ({num_ticks}, {rows}, {cols})",
-        )
+        dataset = open_dataset(fobj, "state")
+        if ck.check(
+            dataset.shape == (num_ticks, rows, cols),
+            f"state shape {dataset.shape} is ({num_ticks}, {rows}, {cols})",
+        ):
+            state = dataset
 
     missing = [name for name in TICK_SERIES if name not in names]
     ck.check(not missing, f"output holds all tick summary series (missing {missing})")
@@ -197,12 +291,14 @@ def verify_structure(
         if name not in names:
             continue
         data = read_dataset(fobj, name)
-        series[name] = data
+        right_length = data.shape == (num_ticks,)
         ck.check(
-            data.shape == (num_ticks,) and data.dtype.kind == kind,
+            right_length and data.dtype.kind == kind,
             f"{name} is a length {num_ticks} '{kind}' series"
             f" (got {data.shape} '{data.dtype}')",
         )
+        if right_length:
+            series[name] = data
 
     if ck.check("runstats" in names, "output holds the runstats group"):
         runstats = read_group(fobj, "runstats")
@@ -225,18 +321,62 @@ def verify_structure(
     return state, series
 
 
-def verify_states(ck: Checker, state: np.ndarray, seed_state: np.ndarray) -> None:
+def scan_state(state: h5py.Dataset, seed_state: np.ndarray) -> StateScan:
+    """Walk the saved state grids one tick at a time.
+
+    Reading the whole dataset costs one byte per tile per tick,
+    which runs to gigabytes at the grid sizes the simulator handles,
+    and every whole array comparison over it costs as much again.
+    So each tick is read on its own,
+    and only the previous tick is held back for the ordering check.
+    """
+    num_ticks = int(state.shape[0])
+    num_tiles = int(state.shape[1] * state.shape[2])
+
+    tallies = np.zeros((3, num_ticks), dtype=np.int64)
+    states_in_range = True
+    never_regresses = True
+    seed_tiles_alight = True
+    seed_is_burning = seed_state == BURNING
+
+    previous: np.ndarray | None = None
+    for tick in range(num_ticks):
+        current = np.asarray(state[tick])
+        tallies[0, tick] = int((current == UNBURNED).sum())
+        tallies[1, tick] = int((current == BURNING).sum())
+        tallies[2, tick] = int((current == BURNT_OUT).sum())
+        # The three tallies only add up to the whole grid
+        # when every tile holds one of the three known states,
+        # so the range check needs no pass of its own.
+        states_in_range = states_in_range and int(tallies[:, tick].sum()) == num_tiles
+        if previous is None:
+            seed_tiles_alight = all_true(current[seed_is_burning] != UNBURNED)
+        else:
+            # Comparing the two slices avoids the widening copy
+            # that a difference of signed bytes would need.
+            never_regresses = never_regresses and all_true(current >= previous)
+        previous = current
+
+    return StateScan(
+        states_in_range=states_in_range,
+        never_regresses=never_regresses,
+        seed_tiles_alight=seed_tiles_alight,
+        tallies=tallies,
+    )
+
+
+def verify_states(ck: Checker, scan: StateScan) -> None:
     """Check the saved state grids on their own terms."""
     ck.check(
-        all_true(np.isin(state, (UNBURNED, BURNING, BURNT_OUT))),
+        scan.states_in_range,
         "every saved state is Unburned, Burning or BurntOut",
     )
     ck.check(
-        all_true(np.diff(state.astype(np.int16), axis=0) >= 0),
+        scan.never_regresses,
         "no tile ever moves backwards through Unburned, Burning, BurntOut",
     )
     ck.check(
-        all_true(state[0][seed_state == BURNING] != UNBURNED),
+        scan.seed_tiles_alight,
         "tiles burning in the seed file are alight at the first saved tick",
     )
 
@@ -244,24 +384,16 @@ def verify_states(ck: Checker, state: np.ndarray, seed_state: np.ndarray) -> Non
 def verify_series(
     ck: Checker,
     series: dict[str, np.ndarray],
-    state: np.ndarray,
-    seed_state: np.ndarray,
+    scan: StateScan,
+    num_tiles: int,
+    num_seed_burning: int,
 ) -> None:
     """Check the tick summary series against the saved state grids."""
-    num_tiles = int(state.shape[1] * state.shape[2])
-
-    counted = np.stack(
-        [
-            (state == UNBURNED).sum(axis=(1, 2)),
-            (state == BURNING).sum(axis=(1, 2)),
-            (state == BURNT_OUT).sum(axis=(1, 2)),
-        ]
-    )
     reported = np.stack(
         [series["num_unburned"], series["num_burning"], series["num_burnt_out"]]
     )
     ck.check(
-        all_true(counted == reported),
+        all_true(scan.tallies == reported),
         "per tick state tallies match the saved state grids",
     )
     ck.check(
@@ -288,12 +420,16 @@ def verify_series(
         "flame generated and received are finite and non negative",
     )
 
-    num_seed_burning = int((seed_state == BURNING).sum())
     burned = int(series["num_burning"][-1] + series["num_burnt_out"][-1])
-    ck.check(
-        burned > num_seed_burning,
-        f"the fire spread beyond the {num_seed_burning} seed tiles"
-        f" ({burned} tiles burning or burnt out at the last tick)",
+    # Spread beyond the seed tiles is the usual outcome, not an invariant.
+    # Ignition is drawn at random,
+    # and a seed sitting in wet ground or in thin fuel can burn out alone.
+    # A correct simulator is free to produce such a run,
+    # so the extent of the fire is reported rather than checked.
+    ck.note(
+        f"the fire reached {burned} tiles"
+        f" burning or burnt out at the last tick,"
+        f" from {num_seed_burning} seed tiles"
     )
     ck.note(
         f"final tally: {int(series['num_unburned'][-1])} unburned,"
@@ -309,6 +445,38 @@ def verify_series(
     )
 
 
+def run_checks(
+    ck: Checker,
+    tile_file: Path,
+    seed_file: Path,
+    tick_file: Path,
+    output_file: Path,
+) -> None:
+    """Run every check over one set of input files and one output file."""
+    inputs = verify_inputs(ck, tile_file, seed_file, tick_file)
+
+    with h5py.File(output_file, "r") as fobj:
+        state, series = verify_structure(
+            ck, fobj, inputs.rows, inputs.cols, inputs.num_ticks
+        )
+        # A seed grid of the wrong shape cannot be laid over the saved state,
+        # and verify_inputs has already counted that as a failure,
+        # so the grid checks are skipped rather than allowed to crash.
+        if state is None or inputs.seed_state.shape != (inputs.rows, inputs.cols):
+            return
+        scan = scan_state(state, inputs.seed_state)
+
+    verify_states(ck, scan)
+    if len(series) == len(TICK_SERIES):
+        verify_series(
+            ck,
+            series,
+            scan,
+            inputs.rows * inputs.cols,
+            inputs.num_seed_burning,
+        )
+
+
 def check_all(
     tile_file: Path,
     seed_file: Path,
@@ -320,19 +488,12 @@ def check_all(
     Returns the number of failed checks.
     """
     ck = Checker()
-    rows, cols, num_ticks = verify_inputs(ck, tile_file, seed_file, tick_file)
-
-    with h5py.File(seed_file, "r") as fobj:
-        seed_state = read_dataset(fobj, "state")
-
-    with h5py.File(output_file, "r") as fobj:
-        state, series = verify_structure(ck, fobj, rows, cols, num_ticks)
-
-    if state is not None and state.shape == (num_ticks, rows, cols):
-        verify_states(ck, state, seed_state)
-        if len(series) == len(TICK_SERIES):
-            verify_series(ck, series, state, seed_state)
-
+    try:
+        run_checks(ck, tile_file, seed_file, tick_file, output_file)
+    except ChecksAborted:
+        pass
+    except InputError as error:
+        ck.check(False, str(error))
     return ck.report()
 
 
@@ -360,7 +521,11 @@ def main() -> int:
 
     args = parser.parse_args()
     command: Callable[[argparse.Namespace], int] = args.func
-    return command(args)
+    try:
+        return command(args)
+    except InputError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

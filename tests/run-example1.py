@@ -24,12 +24,17 @@ import click
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 try:
-    from check_output import check_all, read_dims
+    from check_output import InputError, check_all, read_dims
 except ImportError as error:  # pragma: no cover - depends on the environment
-    raise SystemExit(
-        f"error: the checks need h5py and polars ({error});"
-        f" run 'pip install -e {REPO_ROOT}[dev]'"
-    )
+    # Only a missing third party package gets the friendly message.
+    # Anything else, such as a broken check_output module,
+    # keeps its own traceback so that the real fault stays visible.
+    if error.name in {"h5py", "numpy", "polars"}:
+        raise SystemExit(
+            f"error: the checks need h5py, numpy and polars ({error});"
+            f" run 'pip install -e {REPO_ROOT}[dev]'"
+        ) from error
+    raise
 
 
 def log(message: str) -> None:
@@ -55,12 +60,18 @@ def run(
         die(f"{argv[0]} exited with status {completed.returncode}")
 
 
-def check_prerequisites(input_files: Sequence[Path]) -> None:
-    """Check that the tools and the input files needed by the test are there."""
-    if shutil.which("ffsc") is None:
-        die(f"ffsc not found; run 'pip install .' in {REPO_ROOT}")
-    if shutil.which("conan") is None:
-        die("conan not found; the C++ project cannot be built")
+def check_prerequisites(input_files: Sequence[Path], building: bool) -> None:
+    """Check that the tools and the input files needed by the test are there.
+
+    The compiler and the build tooling are only needed for a build.
+    A run under --skip-build reuses what an earlier run left behind,
+    so it asks for neither.
+    """
+    if building:
+        if shutil.which("ffsc") is None:
+            die(f"ffsc not found; run 'pip install .' in {REPO_ROOT}")
+        if shutil.which("conan") is None:
+            die("conan not found; the C++ project cannot be built")
     for input_file in input_files:
         if not input_file.is_file():
             die(f"missing input file {input_file}")
@@ -114,7 +125,7 @@ def check_prerequisites(input_files: Sequence[Path]) -> None:
     "--skip-build",
     is_flag=True,
     envvar="SKIP_BUILD",
-    help="Reuse an already built simulator binary.",
+    help="Reuse the generated project and the simulator binary of an earlier run.",
 )
 @click.argument("simulator_args", nargs=-1, type=click.UNPROCESSED)
 def main(
@@ -145,19 +156,22 @@ def main(
     simulator = work_dir / "build" / build_type / "simulator"
 
     log("Checking prerequisites")
-    check_prerequisites([model, tile_file, seed_file, tick_file])
+    check_prerequisites([model, tile_file, seed_file, tick_file], not skip_build)
     click.echo(f"model:  {model}")
     click.echo(f"data:   {data_dir}")
     click.echo(f"work:   {work_dir}")
 
-    log("Compiling the model to a C++ project")
-    run(["ffsc", "compile", "-i", model, "-o", work_dir])
-
     if skip_build:
-        log("Skipping the build as requested")
+        # Regenerating the project here would leave the checks
+        # reporting on a binary that predates the model they read,
+        # so --skip-build skips the compile step as well.
+        log("Skipping the compile and the build as requested")
         if not os.access(simulator, os.X_OK):
             die(f"no simulator at {simulator}; drop --skip-build")
     else:
+        log("Compiling the model to a C++ project")
+        run(["ffsc", "compile", "-i", model, "-o", work_dir])
+
         log("Building the simulator")
         # The generated CMakeLists asks for C++23,
         # so Conan has to agree with it
@@ -179,7 +193,10 @@ def main(
             die(f"the build produced no simulator at {simulator}")
 
     log("Reading the input dimensions")
-    num_rows, num_cols, num_ticks = read_dims(tile_file, tick_file)
+    try:
+        num_rows, num_cols, num_ticks = read_dims(tile_file, tick_file)
+    except InputError as error:
+        die(str(error))
     click.echo(f"NUM_ROWS={num_rows} NUM_COLS={num_cols} NUM_TICKS={num_ticks}")
 
     log(f"Running the simulator on {threads} threads")

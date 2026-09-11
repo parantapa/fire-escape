@@ -92,7 +92,7 @@ class TypeEnv:
             if not self.is_numeric(type2):
                 raise TypeError(f"Binary {op} not supported for type {type2}")
             return "bool"
-        elif op in ["+", "-", "*", "/"]:
+        elif op in ["+", "-", "*"]:
             if not self.is_numeric(type1):
                 raise TypeError(f"Binary {op} not supported for type {type1}")
             if not self.is_numeric(type2):
@@ -100,6 +100,16 @@ class TypeEnv:
             rtype = self.lub_type(type1, type2)
             assert rtype is not None
             return rtype
+        elif op == "/":
+            # `/` is true division, as in Python.
+            # Two integral operands still produce a float,
+            # and the code generator converts the left operand accordingly.
+            # Integer division is not reachable from the surface language.
+            if not self.is_numeric(type1):
+                raise TypeError(f"Binary {op} not supported for type {type1}")
+            if not self.is_numeric(type2):
+                raise TypeError(f"Binary {op} not supported for type {type2}")
+            return "float"
         elif op == "%":
             if not self.is_integral(type1):
                 raise TypeError(f"Binary {op} not supported for type {type1}")
@@ -132,21 +142,26 @@ class TypeEnv:
     def check_assign(self, ltype: str, rtype: str):
         if not self.is_convertable_to(rtype, ltype):
             raise TypeError(
-                f"Can't assign expression of type {ltype} to variable of type {rtype}"
+                f"Can't assign expression of type {rtype} to variable of type {ltype}"
             )
 
     def check_update(self, op: str, ltype: str, rtype: str):
-        if op in ["+=", "-=", "*=", "/="]:
-            if not self.is_numeric(ltype):
-                raise TypeError(f"Binary {op} not supported for type {ltype}")
-            if not self.is_numeric(rtype):
-                raise TypeError(f"Binary {op} not supported for type {rtype}")
-        else:
+        if op not in ["+=", "-=", "*=", "/="]:
             raise CompilerError(f"Unexpected update operator: {op}")
 
-        if not self.is_convertable_to(rtype, ltype):
+        if not self.is_numeric(ltype):
+            raise TypeError(f"Binary {op} not supported for type {ltype}")
+        if not self.is_numeric(rtype):
+            raise TypeError(f"Binary {op} not supported for type {rtype}")
+
+        # An update statement is the matching binary operation
+        # followed by an assignment back to the left operand,
+        # so the result of that operation drives the check.
+        # This is what keeps `/=` in step with true division.
+        result = self.check_binary(op[0], ltype, rtype)
+        if not self.is_convertable_to(result, ltype):
             raise TypeError(
-                f"Can't assign expression of type {ltype} to variable of type {rtype}"
+                f"Can't assign expression of type {result} to variable of type {ltype}"
             )
 
 
@@ -196,12 +211,57 @@ def get_type(node: AstNode | BuiltinFunc | BuiltinObject) -> str:
             raise CompilerError(f"Unexpected expression type: {unexpected=}")
 
 
+def block_terminates(block: Block) -> bool:
+    """Return True when control cannot fall off the end of the block.
+
+    A block terminates as soon as one of its statements terminates.
+    Statements after that one are unreachable.
+    """
+    return any(stmt_terminates(stmt) for stmt in block.stmts)
+
+
+def stmt_terminates(stmt: AstNode) -> bool:
+    """Return True when control cannot flow past the statement.
+
+    A return statement always terminates.
+    An if statement terminates when it has an else section,
+    and every one of its branches terminates.
+    An if statement without an else section never terminates,
+    because the condition can be false.
+    """
+    match stmt:
+        case ReturnStmt():
+            return True
+
+        case IfStmt() as stmt:
+            if stmt.else_ is None:
+                return False
+
+            return (
+                block_terminates(stmt.block)
+                and all(block_terminates(sec.block) for sec in stmt.elifs)
+                and block_terminates(stmt.else_.block)
+            )
+
+        case _:
+            return False
+
+
 def check_type(node: AstNode, env: TypeEnv):
     try:
         for child in node.children:
             check_type(child, env)
 
         match node:
+            case Ref() as ref:
+                match ref.values:
+                    case [TickVar() as var] if not var.is_real:
+                        raise CodeError(
+                            f"{var.name} is the key column of the tick data"
+                            " and can't be used in an expression",
+                            pos=ref.pos,
+                        )
+
             case TypeRef() as tref:
                 if tref.name not in env.graph:
                     raise TypeError(f"Unknown type: {tref.name}")
@@ -272,8 +332,13 @@ def check_type(node: AstNode, env: TypeEnv):
                     raise TypeError("Condition expression type not boolean or numeric")
 
             case Func() as func:
-                if func.rtype is not None and not func.return_stmts:
-                    raise TypeError("Function with defined return types must return")
+                if func.rtype is not None and not block_terminates(func.block):
+                    raise TypeError(
+                        f"Function {func.name} can complete without returning"
+                        f" a value of type {func.rtype.name}:"
+                        " every path through the body must return",
+                        pos=func.pos,
+                    )
 
             case TickData() as tick_data:
                 if not env.is_integral(get_type(tick_data.key_var.type)):

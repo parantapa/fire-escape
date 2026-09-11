@@ -68,11 +68,25 @@ def _binary_left_assoc(children, pos):
         )
 
 
+def _is_kept(child: Any) -> bool:
+    """Return True for a child that carries meaning for the AST.
+
+    A rule marked with `!` in the grammar keeps every one of its tokens,
+    which overrides the filtering that the leading underscore of `_NEWLINE`
+    would otherwise apply.
+    The statement terminator is punctuation, so it is dropped here instead.
+    """
+    if child is None:
+        return False
+
+    return not (isinstance(child, Token) and child.type == "_NEWLINE")
+
+
 def build_ast(tree: Tree, file: str):
     children = [
         build_ast(child, file) if isinstance(child, Tree) else child
         for child in tree.children
-        if child is not None
+        if _is_kept(child)
     ]
     pos = Position(file=file, line=tree.meta.line, col=tree.meta.column)
 
@@ -80,7 +94,7 @@ def build_ast(tree: Tree, file: str):
         case "bool":
             (child,) = children
             value = child.value == "True"
-            return Bool(value=True, pos=pos, children=[])
+            return Bool(value=value, pos=pos, children=[])
 
         case "int":
             (child,) = children
@@ -107,7 +121,14 @@ def build_ast(tree: Tree, file: str):
         case "unary_neg" | "unary_not":
             return _unary(children, pos)
 
-        case "binary_exp" | "binary_mul" | "binary_add" | "binary_cmp" | "binary_and":
+        case (
+            "binary_exp"
+            | "binary_mul"
+            | "binary_add"
+            | "binary_cmp"
+            | "binary_and"
+            | "binary_or"
+        ):
             return _binary_left_assoc(children, pos)
 
         case "func_call":
@@ -674,9 +695,13 @@ def populate_source_opts(source: Source):
     source.opts["chunk_size_x"] = 64
     source.opts["chunk_size_y"] = 64
 
+    seen: set[str] = set()
     for opt in source.options:
         if opt.name not in source.opts:
             raise CodeError(f"Unknown option {opt.name}", pos=opt.pos)
+        if opt.name in seen:
+            raise CodeError(f"Option {opt.name} has already been defined", pos=opt.pos)
+        seen.add(opt.name)
         source.opts[opt.name] = opt.value
 
     if source.opts["chunk_size_x"] < source.opts["max_jump_x"]:

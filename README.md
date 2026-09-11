@@ -68,6 +68,18 @@ also becomes a command line flag,
 so `config base_ember_rate` can be overridden with `--config-base-ember-rate 0.9`
 without recompiling.
 
+The `--seed` flag sets the RNG seed.
+A negative value, which is the default, draws a fresh seed from the system.
+The effective seed is echoed at startup,
+and it is saved as the `seed` attribute of the `runstats` group in the output file,
+so a run can be repeated from its own output.
+
+Reproducibility holds for a fixed thread count.
+Two single threaded runs with the same seed produce identical output
+and an identical `log_prob`.
+Runs that use different thread counts diverge,
+because the work schedule decides which thread draws which sample.
+
 ## The FFSL language
 
 A source file is made up of six kinds of top level declarations.
@@ -172,6 +184,14 @@ def ember_creation_rate(fuel: float, moisture: float) -> float:
 ```
 
 Blocks are delimited by indentation, as in Python.
+
+Division follows Python rather than C.
+The `/` operator always produces a `float`,
+so `1 / 2` is `0.5` and not `0`.
+A function that returns an `int` therefore cannot return a division directly,
+and `n /= 2` is rejected when `n` is an `int`.
+Every function must return on every path,
+so an `if` without an `else` is not enough to satisfy a declared return type.
 
 Three builtins are available:
 `exp(float)`,
