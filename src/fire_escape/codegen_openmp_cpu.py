@@ -1,6 +1,7 @@
-"""Code generation."""
+"""The OpenMP CPU backend: an FFSL tree in, a buildable C++ project out."""
 
 import math
+from typing import Any
 from pathlib import Path
 
 import click
@@ -22,12 +23,20 @@ ENVIRONMENT = jinja2.Environment(
 )
 
 
-def render(template: str, **kwargs) -> str:
+def render(template: str, **kwargs: Any) -> str:
+    """Render a named template against the given context."""
     tpl = ENVIRONMENT.get_template(template)
     return tpl.render(**kwargs)
 
 
 def mangle(name: str) -> str:
+    """Return the C++ identifier standing for an FFSL name."""
+    # Every name from the model is prefixed.
+    # No model can then collide with an identifier the template
+    # already uses, such as `x` or `pos`.
+    # A leading underscore is reserved at file scope in C++,
+    # and the model's functions, configs and data arrays
+    # are declared at file scope.
     return "_" + name
 
 
@@ -96,6 +105,7 @@ FLT_MAX = 3.4028234663852886e38
 
 
 def cpp_type(name: str) -> str:
+    """Return the C++ type standing for an FFSL type name."""
     return TYPE_TO_CTYPE[name]
 
 
@@ -103,14 +113,21 @@ ENVIRONMENT.filters["cpp_type"] = cpp_type
 
 
 def h5_type(name: str) -> str:
+    """Return the HDF5 predefined type standing for an FFSL type name."""
     return TYPE_TO_H5TYPE[name]
 
 
 ENVIRONMENT.filters["h5_type"] = h5_type
 
 
-# Hack required for argparse, which doesn't handle floats well yet.
 def cpp_type_config(name: str) -> str:
+    """Return the C++ type a config flag of this FFSL type parses into.
+
+    This is `cpp_type` except for `float`, which widens to `double`,
+    so a caller comparing the two decides whether a cast is needed.
+    """
+    # See "Config values of type `float` are stored as `double`"
+    # in docs/developer-notes.md.
     if name == "float":
         return "double"
     else:
@@ -121,6 +138,7 @@ ENVIRONMENT.filters["cpp_type_config"] = cpp_type_config
 
 
 def cpp_init(name: str) -> str:
+    """Return the C++ initializer that zeroes a variable of this FFSL type."""
     if name == "position":
         return "{0, 0}"
     else:
@@ -131,13 +149,15 @@ ENVIRONMENT.filters["cpp_init"] = cpp_init
 
 
 def cpp_float_literal(value: float, pos: Position) -> str:
-    """Render a Python float as a C++ float literal.
+    """Render a Python float as a C++ `float` literal.
 
-    An unsuffixed C++ floating literal has type double,
-    which would pull the surrounding expression into double precision.
-    Python's repr always produces either a decimal point or an exponent,
-    so appending an `f` suffix is enough to make the literal well formed.
+    Raises `CodeError` when the value is not finite,
+    or when its magnitude is out of range for a binary32 float.
     """
+    # An unsuffixed C++ floating literal has type double, which pulls
+    # the surrounding expression into double precision.
+    # Python's repr always produces a decimal point or an exponent,
+    # so an `f` suffix is enough to make the literal well formed.
     if not math.isfinite(value):
         raise CodeError(f"Float literal {value!r} is not a finite number", pos=pos)
 
@@ -153,6 +173,12 @@ def cpp_float_literal(value: float, pos: Position) -> str:
 
 
 def codegen_expr(node: AstNode) -> str:
+    """Return the C++ expression for an already type-checked expression node.
+
+    Raises `CodeError` for a float literal that `cpp_float_literal` rejects.
+    Raises `CompilerError` for a node the backend does not handle,
+    which is a fault in the compiler rather than in the model.
+    """
     match node:
         case Bool() as lit:
             return {True: "true", False: "false"}[lit.value]
@@ -167,6 +193,9 @@ def codegen_expr(node: AstNode) -> str:
                 case [LocalVariable() | Parameter() as obj]:
                     return mangle(obj.name)
                 case [Config() as obj]:
+                    # The narrowing half of `cpp_type_config`.
+                    # See "Config values of type `float` are stored as `double`"
+                    # in docs/developer-notes.md.
                     ctype = cpp_type(obj.type.name)
                     if ctype == cpp_type_config(obj.type.name):
                         return mangle(obj.name)
@@ -180,6 +209,9 @@ def codegen_expr(node: AstNode) -> str:
                 case [BuiltinObject() as obj]:
                     return obj.name.upper()
                 case [BuiltinObject() as row, TileVar() as col]:
+                    # These are the tile coordinates and the `Position` locals
+                    # that simulator.cpp declares around the model expressions.
+                    # init_change_time is the exception, and declares no `pos`.
                     match row.type:
                         case "tile":
                             xindex, yindex, position = "x", "y", "pos"
@@ -207,9 +239,8 @@ def codegen_expr(node: AstNode) -> str:
             if op == "**":
                 return f"std::powf( {left}, {right} )"
             elif op == "/":
-                # `/` is true division, as in Python.
-                # C++ would divide two integral operands as integers,
-                # so the left operand is converted first.
+                # `/` is always true division.
+                # See "Division is always true division" in docs/developer-notes.md.
                 if cpp_type(get_type(lexpr)) not in FLOAT_CTYPES:
                     left = f"float( {left} )"
                 return f"( {left} / {right} )"
@@ -235,6 +266,10 @@ ENVIRONMENT.filters["codegen_expr"] = codegen_expr
 
 
 def codegen_stmt(node: AstNode) -> str:
+    """Return the C++ statement for a statement node.
+
+    Raises `CompilerError` for a node the backend does not handle.
+    """
     match node:
         case PassStmt() as stmt:
             return "// pass"
@@ -304,6 +339,13 @@ def codegen_stmt(node: AstNode) -> str:
 
 
 def codegen(node: AstNode | tuple[AstNode, str]) -> str:
+    """Return the C++ text for a source tree, or for one part of a function.
+
+    A `Func` is paired with `"decl"` or `"defn"` to pick which of the two
+    it renders as. A `Source` renders the whole translation unit.
+
+    Raises `CompilerError` for anything else.
+    """
     match node:
         case [Func() as fn, "decl"]:
             rtype = "void" if fn.rtype is None else cpp_type(fn.rtype.name)
@@ -357,6 +399,7 @@ def codegen(node: AstNode | tuple[AstNode, str]) -> str:
             new_lines = []
             for i, line in enumerate(lines, 1):
                 if line.strip() == "#endline":
+                    # See the developer notes on `#endline`.
                     # `#line N` numbers the line after the directive,
                     # and the directive itself sits on line i.
                     line = line.replace("#endline", f'#line {i + 1} "simulator.cpp"')
@@ -382,7 +425,7 @@ def codegen(node: AstNode | tuple[AstNode, str]) -> str:
     type=click.Path(exists=False, file_okay=False, dir_okay=True, path_type=Path),
     help="C++ project directory.",
 )
-def compile_cmd(input_file: Path, output_dir: Path):
+def compile_cmd(input_file: Path, output_dir: Path) -> None:
     """Compile the FFSL code to a C++ project."""
     output_dir.mkdir(exist_ok=True, parents=True, mode=0o755)
     source = parse(str(input_file), input_file.read_text())

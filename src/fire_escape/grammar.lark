@@ -5,6 +5,7 @@
 %import common.WS_INLINE
 %import common.SH_COMMENT
 
+// Emitted by `MyIndenter` in parser.py, not by the lexer.
 %declare _INDENT _DEDENT
 
 COMMENT.1: SH_COMMENT
@@ -22,6 +23,9 @@ type: CNAME
 
 func_call: ref "(" [ expression ( "," expression )* ]  ")"
 
+// `!` keeps the operator tokens, which `build_ast` reads.
+// `?` inlines a level that has a single child,
+// so the precedence ladder adds no nodes of its own.
 ?expression: binary_or
 ?!binary_or: binary_and ( "or" binary_and )*
 ?!binary_and: unary_not ( "and" unary_not )*

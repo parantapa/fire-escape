@@ -1,4 +1,4 @@
-"""Type checking system."""
+"""The FFSL type lattice, and the pass that annotates the AST with types."""
 
 from __future__ import annotations
 
@@ -8,17 +8,24 @@ from dataclasses import dataclass
 import networkx as nx
 
 from .ast_nodes import *
-from .ast_nodes import DeterministicDist
 from .builtins import *
 from .error import *
 
 
 @dataclass
 class TypeEnv:
+    """The conversion lattice over FFSL type names.
+
+    An edge runs from a type to one it converts to implicitly,
+    which can lose range or precision, as `i64` to `int` does.
+    Reachability is therefore convertibility.
+    """
+
     graph: nx.DiGraph
 
     @classmethod
     def new(cls) -> Self:
+        """Build the environment holding the language's own types."""
         graph = nx.DiGraph()
 
         nx.add_path(graph, ("bool", "uint", "int", "float"))
@@ -33,6 +40,10 @@ class TypeEnv:
         return env
 
     def is_convertable_to(self, child: str, ancestor: str) -> bool:
+        """Whether `child` converts to `ancestor`, which every type does to itself.
+
+        An unknown type name converts only to itself, rather than raising.
+        """
         if child == ancestor:
             return True
 
@@ -42,13 +53,21 @@ class TypeEnv:
             return False
 
     def is_numeric(self, child: str) -> bool:
+        """Whether `child` converts to `float`, which `bool` does."""
         return self.is_convertable_to(child, "float")
 
     def is_integral(self, child: str) -> bool:
+        """Whether `child` converts to `int`, which `bool` does."""
         return self.is_convertable_to(child, "int")
 
     def lub_type(self, type1: str, type2: str) -> str | None:
+        """Return the narrowest type both arguments convert to.
+
+        `None` when either type is unknown,
+        or when the two have no common type, as `position` and `int` do.
+        """
         if type1 in self.graph and type2 in self.graph:
+            # A lowest common ancestor in the reversed graph is a join.
             ltype = nx.lowest_common_ancestor(
                 self.graph.reverse(copy=False), type1, type2
             )
@@ -57,6 +76,11 @@ class TypeEnv:
             return None
 
     def check_unary(self, op: str, arg_type: str) -> str:
+        """Return the result type of `op arg_type`.
+
+        Raises `TypeError` when the operand type does not support `op`,
+        and `CompilerError` for an operator the grammar should not produce.
+        """
         match op:
             case "-":
                 if not self.is_numeric(arg_type):
@@ -73,6 +97,11 @@ class TypeEnv:
                 raise CompilerError(f"Unexpected unary operator: {op}")
 
     def check_binary(self, op: str, type1: str, type2: str) -> str:
+        """Return the result type of `type1 op type2`.
+
+        Raises `TypeError` when either operand type does not support `op`,
+        and `CompilerError` for an operator the grammar should not produce.
+        """
         if op in ["or", "and"]:
             if not self.is_numeric(type1):
                 raise TypeError(f"Binary {op} not supported for type {type1}")
@@ -97,14 +126,13 @@ class TypeEnv:
                 raise TypeError(f"Binary {op} not supported for type {type1}")
             if not self.is_numeric(type2):
                 raise TypeError(f"Binary {op} not supported for type {type2}")
+            # Both operands reach `float`, so a join always exists.
             rtype = self.lub_type(type1, type2)
             assert rtype is not None
             return rtype
         elif op == "/":
-            # `/` is true division, as in Python.
-            # Two integral operands still produce a float,
-            # and the code generator converts the left operand accordingly.
-            # Integer division is not reachable from the surface language.
+            # `/` is always true division.
+            # See "Division is always true division" in docs/developer-notes.md.
             if not self.is_numeric(type1):
                 raise TypeError(f"Binary {op} not supported for type {type1}")
             if not self.is_numeric(type2):
@@ -115,6 +143,7 @@ class TypeEnv:
                 raise TypeError(f"Binary {op} not supported for type {type1}")
             if not self.is_integral(type2):
                 raise TypeError(f"Binary {op} not supported for type {type2}")
+            # Both operands reach `int`, so a join always exists.
             rtype = self.lub_type(type1, type2)
             assert rtype is not None
             return rtype
@@ -128,6 +157,11 @@ class TypeEnv:
             raise CompilerError(f"Unexpected binary operator: {op}")
 
     def check_func_call(self, ptypes: list[str], rtype: str, atypes: list[str]) -> str:
+        """Check the arguments against the parameters, then return `rtype`.
+
+        Raises `TypeError` on an arity mismatch,
+        or when an argument type does not convert to its parameter type.
+        """
         if not len(ptypes) == len(atypes):
             raise TypeError(
                 f"Parameter count mismatch: expected {len(ptypes)}, got {len(atypes)}"
@@ -139,13 +173,21 @@ class TypeEnv:
                 )
         return rtype
 
-    def check_assign(self, ltype: str, rtype: str):
+    def check_assign(self, ltype: str, rtype: str) -> None:
+        """Raise `TypeError` unless a value of `rtype` can be stored in `ltype`."""
         if not self.is_convertable_to(rtype, ltype):
             raise TypeError(
                 f"Can't assign expression of type {rtype} to variable of type {ltype}"
             )
 
-    def check_update(self, op: str, ltype: str, rtype: str):
+    def check_update(self, op: str, ltype: str, rtype: str) -> None:
+        """Raise `TypeError` unless `ltype op= rtype` is well typed.
+
+        `/=` on an integral left operand is rejected,
+        because true division yields a float.
+
+        Raises `CompilerError` for an operator the grammar should not produce.
+        """
         if op not in ["+=", "-=", "*=", "/="]:
             raise CompilerError(f"Unexpected update operator: {op}")
 
@@ -154,10 +196,10 @@ class TypeEnv:
         if not self.is_numeric(rtype):
             raise TypeError(f"Binary {op} not supported for type {rtype}")
 
-        # An update statement is the matching binary operation
-        # followed by an assignment back to the left operand,
-        # so the result of that operation drives the check.
-        # This is what keeps `/=` in step with true division.
+        # An update statement is the matching binary operation,
+        # followed by an assignment back to the left operand.
+        # The result of that operation therefore drives the check,
+        # which is what keeps `/=` in step with true division.
         result = self.check_binary(op[0], ltype, rtype)
         if not self.is_convertable_to(result, ltype):
             raise TypeError(
@@ -166,6 +208,16 @@ class TypeEnv:
 
 
 def get_type(node: AstNode | BuiltinFunc | BuiltinObject) -> str:
+    """Return the FFSL type name of an already checked node.
+
+    `check_type` must run over an expression node first,
+    since its type is read off the annotation that pass writes.
+    A callable yields its signature rendered as a string.
+
+    Raises `CompilerError` for a node kind that has no type.
+    An expression node that `check_type` has not annotated
+    fails an assertion instead.
+    """
     match node:
         case Bool():
             return "bool"
@@ -226,14 +278,14 @@ def stmt_terminates(stmt: AstNode) -> bool:
     A return statement always terminates.
     An if statement terminates when it has an else section,
     and every one of its branches terminates.
-    An if statement without an else section never terminates,
-    because the condition can be false.
+    An if statement without an else section never terminates.
     """
     match stmt:
         case ReturnStmt():
             return True
 
         case IfStmt() as stmt:
+            # The condition can be false, so control can skip every branch.
             if stmt.else_ is None:
                 return False
 
@@ -247,8 +299,19 @@ def stmt_terminates(stmt: AstNode) -> bool:
             return False
 
 
-def check_type(node: AstNode, env: TypeEnv):
+def check_type(node: AstNode, env: TypeEnv) -> None:
+    """Type check the tree rooted at `node`, and annotate expressions in place.
+
+    `ReturnStmt.func` must already be linked,
+    as `link_return_statements` in `parser.py` does.
+
+    Raises `CodeError` for a fault in the model,
+    positioned at the innermost node that knew where it was,
+    and `CompilerError` for anything else.
+    """
     try:
+        # Children are checked before their parent,
+        # so every subexpression carries a type by the time the parent needs it.
         for child in node.children:
             check_type(child, env)
 
@@ -312,7 +375,7 @@ def check_type(node: AstNode, env: TypeEnv):
             case ReturnStmt() as stmt:
                 assert stmt.func is not None
                 if (stmt.arg is None) != (stmt.func.rtype is None):
-                    raise TypeError(f"Return type mismatch")
+                    raise TypeError("Return type mismatch")
 
                 if stmt.arg is not None and stmt.func.rtype is not None:
                     atype = get_type(stmt.arg)
@@ -382,6 +445,9 @@ def check_type(node: AstNode, env: TypeEnv):
                 if not env.is_numeric(get_type(node.prob)):
                     raise TypeError("Expected numeric expression", node.prob.pos)
 
+    # These clauses repeat what `node_error_attributer` in `error.py` does.
+    # See "Positions are attributed by the innermost frame that knows one"
+    # in docs/developer-notes.md.
     except CodeError as e:
         e.pos = node.pos if e.pos is None else e.pos
         raise e

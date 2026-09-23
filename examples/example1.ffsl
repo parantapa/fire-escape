@@ -29,7 +29,7 @@ fire-model:
     ember-ignition-prob(t) : ignition_prob(t.fuel, t.moisture)
 
     create-flames(t) : deterministic[1.0]
-    flame-spread-weight(s, d) : 1.0 # flame_spread_likelihood(s.pos, d.pos)
+    flame-spread-weight(s, d) : 1.0
     flame-ignition-prob(t) : ignition_prob(t.fuel, t.moisture)
 
     burn-time(t) : normal[t.burn_time * 20, 1.0]

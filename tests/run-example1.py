@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""End to end test of the OpenMP CPU backend.
+"""End-to-end test of the OpenMP CPU backend.
 
 Compiles an FFSL model with ffsc,
-builds the generated C++ project with Conan,
-runs the simulator over the t1 test dataset,
-and checks the output file against the inputs.
+then builds the generated C++ project with Conan.
+Runs the simulator over the t1 test dataset,
+then checks the output file against the inputs.
 
 Run with --help for the argument list.
 """
@@ -23,6 +23,8 @@ import click
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Python puts the directory of this script on sys.path,
+# which is what makes the sibling check_output module importable.
 try:
     from check_output import InputError, check_all, read_dims
 except ImportError as error:  # pragma: no cover - depends on the environment
@@ -52,7 +54,7 @@ def run(
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
 ) -> None:
-    """Run a command, letting its output through, and abort if it fails."""
+    """Run a command, let its output through, and abort if it fails."""
     argv = [str(part) for part in command]
     click.echo("$ " + shlex.join(argv))
     completed = subprocess.run(argv, cwd=cwd, env=env, check=False)
@@ -63,10 +65,11 @@ def run(
 def check_prerequisites(input_files: Sequence[Path], building: bool) -> None:
     """Check that the tools and the input files needed by the test are there.
 
-    The compiler and the build tooling are only needed for a build.
-    A run under --skip-build reuses what an earlier run left behind,
-    so it asks for neither.
+    Looks for ffsc and conan only when `building` is true.
+    Raises `SystemExit` through `die` on the first thing missing.
     """
+    # A run under --skip-build reuses what an earlier run left behind,
+    # so it needs neither the compiler nor the build tooling.
     if building:
         if shutil.which("ffsc") is None:
             die(f"ffsc not found; run 'pip install .' in {REPO_ROOT}")
@@ -141,7 +144,7 @@ def main(
     """Compile, build, run and check a model against the t1 test dataset.
 
     Arguments given after -- are passed on to the simulator,
-    so run time config options can be exercised like this:
+    so this is how to exercise a run-time config option:
 
     \b
         tests/run-example1.py -m examples/example1.ffsl \\
@@ -162,9 +165,9 @@ def main(
     click.echo(f"work:   {work_dir}")
 
     if skip_build:
-        # Regenerating the project here would leave the checks
-        # reporting on a binary that predates the model they read,
-        # so --skip-build skips the compile step as well.
+        # A regenerated project here would no longer match
+        # the binary that the checks report on.
+        # So --skip-build skips the compile step as well.
         log("Skipping the compile and the build as requested")
         if not os.access(simulator, os.X_OK):
             die(f"no simulator at {simulator}; drop --skip-build")
@@ -200,6 +203,8 @@ def main(
     click.echo(f"NUM_ROWS={num_rows} NUM_COLS={num_cols} NUM_TICKS={num_ticks}")
 
     log(f"Running the simulator on {threads} threads")
+    # Without this, a run that writes no output
+    # would leave the checks reading the file of an earlier run.
     output_file.unlink(missing_ok=True)
     run(
         [

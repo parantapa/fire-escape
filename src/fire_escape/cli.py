@@ -9,23 +9,22 @@ from .error import CodeError
 
 
 @click.group()
-def cli():
+def cli() -> None:
     """Forest fire simulator language (FFSL) compiler."""
 
 
 cli.add_command(compile_cmd)
 
 
-def main():
+def main() -> None:
     """Run the command line interface.
 
-    A CodeError reports a mistake in the FFSL source being compiled,
-    so it is printed as a plain located message.
-    Any other exception reports a mistake in the compiler itself,
-    and it keeps its traceback.
+    Exits with status 1 on an error in the FFSL source being compiled.
     """
     try:
         cli()
     except CodeError as error:
+        # A `CodeError` prints as one line, without a traceback.
+        # See the developer notes on compiler faults and model faults.
         print(error, file=sys.stderr)
         raise SystemExit(1)

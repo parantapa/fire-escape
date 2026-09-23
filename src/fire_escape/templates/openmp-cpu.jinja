@@ -1,4 +1,9 @@
 {#- name: "assignment_stmt" -#}
+{#
+    `#line` attributes the generated statement to its line in the model.
+    `#endline` is not a directive: `codegen` in codegen_openmp_cpu.py
+    replaces it with a `#line` back into simulator.cpp.
+#}
 #line {{ pos.line }} "{{ pos.file }}"
 {{ lvalue }} = {{ rvalue }} ;
 #endline
@@ -52,6 +57,7 @@ if ({{ condition }}) {
 static inline {{ rtype }} {{ name }}( {{ ptypes | join(", ") }} ) ;
 
 {#- name: "func_defn" -#}
+{# The definition inherits `static inline` from the func_decl declaration that precedes it. #}
 #line {{ pos.line }} "{{ pos.file }}"
 {{ rtype }} {{ name }}( {{ params |  join(", ") }}) {
     {% for var, type, init in lvars %}
@@ -100,6 +106,8 @@ struct Position {
     std::int32_t y;
 };
 
+// The fire_state encoding of the seed file and the output file.
+// tests/check_output.py repeats it.
 using fire_state_t = std::int8_t;
 constexpr fire_state_t Unburned = 0;
 constexpr fire_state_t Burning = 1;
@@ -110,7 +118,7 @@ using RngEngine = r123::Engine<Rng>;
 
 // The mdspan index type is 64 bits wide
 // because a 32 bit offset computation wraps at realistic grid sizes.
-// A 4096 x 4096 grid with max_jump 8 holds 4,848,615,424 jump entries,
+// A 4096 x 4096 grid with max_jump_x and max_jump_y of 8 holds 4,848,615,424 jump entries,
 // and the wrap point sits near a 2730 x 2730 grid.
 // Every allocation below counts elements in std::size_t for the same reason.
 using tick_extents_t = stdex::dextents<std::int64_t, 1>;
@@ -128,8 +136,8 @@ static inline float alignment(Position a, Position b, float direction) {
     float d_abs = std::hypotf(dx, dy);
 
     // Two coincident positions carry no direction to project onto the heading.
-    // The neighborhood of a source tile always includes the source itself,
-    // so this case is evaluated on every burning tile,
+    // The ember jump neighborhood of a source tile always includes the source itself,
+    // so this case is evaluated for every tile that generates embers,
     // and dividing by zero would push a NaN into the model.
     if (d_abs == 0.0f) {
         return 0.0f;
@@ -414,6 +422,7 @@ static void init_change_time() {
 
                     change_time[x, y] = burn_time;
                 } else {
+                    // -1 matches no tick, so do_transition never selects this tile.
                     change_time[x, y] = -1;
                 }
             }
@@ -440,6 +449,8 @@ static inline bool tick_value_fits(SourceType in) {
     if constexpr (std::is_same_v<ValueType, SourceType>) {
         return true;
     } else if constexpr (std::is_same_v<ValueType, bool> || std::is_same_v<SourceType, bool>) {
+        // A bool fits in every numeric type,
+        // and any number converts to bool by comparison with zero.
         return true;
     } else if constexpr (std::is_floating_point_v<ValueType>) {
         if constexpr (std::is_floating_point_v<SourceType>) {
@@ -581,6 +592,8 @@ static arrow::Status load_tick_data(const std::string& file_name) {
     return arrow::Status::OK();
 }
 
+// Builds the alias table (Vose's method) over the jump likelihoods of one source tile.
+// It also overwrites each entry of jump_like with its log probability.
 static void prepare_alias_table(std::int32_t x, std::int32_t y) {
     std::int32_t n_elems = (2 * MAX_JUMP_X + 1) * (2 * MAX_JUMP_Y + 1);
     auto likelihood = stdex::mdspan(&jump_like[x, y, 0, 0], n_elems);
@@ -597,7 +610,7 @@ static void prepare_alias_table(std::int32_t x, std::int32_t y) {
         lhsum += likelihood[i];
     }
 
-    // Everything is too close to zero
+    // No destination carries any weight, so the table falls back to a uniform draw.
     if (lhsum < std::numeric_limits<double>::epsilon()) {
 	for (std::int32_t i = 0; i < n_elems; i++) {
 	    alias_prob[i] = 1.0;
@@ -662,7 +675,7 @@ static std::pair<std::int32_t, std::int32_t> sample_alias_table(std::int32_t x, 
     return std::make_pair(idx, idy);
 }
 
-// After prepare_table is called, jump_like contains the log probs
+// Reads the log probability that prepare_alias_table left in jump_like.
 static inline float alias_table_log_prob(std::int32_t idx, std::int32_t idy, std::int32_t x, std::int32_t y) {
     return jump_like[x, y, idx, idy];
 }
@@ -721,16 +734,13 @@ static void execute_tick() {
 
         {% endfor %}
 
-        // The loops above keep nowait because they write disjoint arrays,
-        // so a thread may run ahead into the next reset loop without harm.
-        // This barrier is required all the same.
-        // An omp for synchronizes only at its own end,
-        // and the reset loops are static while the phases below are guided,
-        // so without it a thread could enter create_embers
-        // and write num_ember_gen for a tile
-        // whose reset chunk still belongs to a thread that is resetting,
+        // The reset loops keep nowait because they write disjoint arrays.
+        // This barrier is still required.
+        // The reset loops are static and the phases below are guided,
+        // so without it a thread could write num_ember_gen in create_embers
+        // for a tile that another thread has not reset yet,
         // and that reset would then zero the fresh value.
-        // The same race holds for jump_like against compute_jump_dist.
+        // jump_like races with compute_jump_dist in the same way.
         #pragma omp barrier
 
         {{ tick_thread_phase_end("reset_for_tick") }}
@@ -1112,11 +1122,10 @@ int main(int argc, char *argv[]) {
 
     double total_alloc_bytes = 0.0;
 
-    // Element counts are computed in std::size_t.
-    // The jump arrays hold 4,848,615,424 elements on a 4096 x 4096 grid
-    // with a maximum jump of 8,
-    // which wraps to 553,648,128 in 32 bit arithmetic,
-    // and the allocation would then succeed at a fraction of the size
+    // Element counts are computed in std::size_t,
+    // for the reason given above the extents types.
+    // A count that wrapped in 32 bit arithmetic
+    // would let the allocation succeed at a fraction of the size
     // while the mdspan still reported the full extents.
     // Each mdspan is built with its declared type rather than a deduced one,
     // so the extents keep their 64 bit index type.
@@ -1328,6 +1337,16 @@ class FireEscapeSimRecipe(ConanFile):
             ),
         )
         self.requires("hdf5/1.14.6")
+
+        # Arrow pulls boost in transitively.
+        # boost/1.91.0 fails in package_info() with
+        # "These libraries were expected to be built, but were not built:
+        # {'boost_cobalt_io_ssl'}",
+        # which stops the build before it compiles anything.
+        # 1.89.0 is the newest version that resolves cleanly.
+        # Drop this override once arrow resolves a working boost on its own,
+        # and check the build before assuming a newer boost works.
+        self.requires("boost/1.89.0", override=True)
 
     def generate(self):
         deps = CMakeDeps(self)

@@ -1,4 +1,4 @@
-"""Parser module."""
+"""Text to a checked AST: parse, build, resolve names, then type check."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from lark import Lark, Tree, Token
 from lark.indenter import Indenter
 
 from .ast_nodes import *
-from .ast_nodes import DeterministicDist
+from .ast_nodes import Expression
 from .error import *
 
 from .type_check import check_type, TypeEnv
@@ -22,16 +22,26 @@ GRAMMAR_FILE = "grammar.lark"
 
 
 class MyIndenter(Indenter):
+    """The postlexer that turns newlines and indentation into tokens."""
+
+    # Lark declares these as abstract properties.
+    # A plain class attribute satisfies them at run time,
+    # but pyright reports it as an incompatible override.
     NL_type = "_NEWLINE"  # type: ignore
     OPEN_PAREN_types = ["LPAR", "LSQB"]  # type: ignore
     CLOSE_PAREN_types = ["RPAR", "RSQB"]  # type: ignore
     INDENT_type = "_INDENT"  # type: ignore
     DEDENT_type = "_DEDENT"  # type: ignore
+    # A tab counts as 8 columns, which is what Python itself assumed
+    # before it rejected mixed indentation.
+    # This accepts a model that mixes tabs and spaces at one depth,
+    # and that model must be rejected.
     tab_len = 8  # type: ignore
 
 
 @cache
 def get_parser() -> Lark:
+    """Return the shared LALR parser, building it on the first call."""
     with importlib.resources.path(GRAMMAR_ANCHOR, GRAMMAR_FILE) as path:
         return Lark(
             path.read_text(),
@@ -43,7 +53,8 @@ def get_parser() -> Lark:
         )
 
 
-def _unary(children, pos):
+def _unary(children, pos: Position) -> Expression:
+    """Build a unary expression, or pass the operand through untouched."""
     match children:
         case [op, arg]:
             return UnaryExpr(op=op.value, arg=arg, pos=pos, children=[arg])
@@ -53,7 +64,8 @@ def _unary(children, pos):
             raise CompilerError(f"{unexpected=}")
 
 
-def _binary_left_assoc(children, pos):
+def _binary_left_assoc(children, pos: Position) -> Expression:
+    """Fold a flat `a op b op c` run into a left-leaning tree."""
     if len(children) == 1:
         return children[0]
     else:
@@ -68,21 +80,31 @@ def _binary_left_assoc(children, pos):
         )
 
 
-def _is_kept(child: Any) -> bool:
-    """Return True for a child that carries meaning for the AST.
-
-    A rule marked with `!` in the grammar keeps every one of its tokens,
-    which overrides the filtering that the leading underscore of `_NEWLINE`
-    would otherwise apply.
-    The statement terminator is punctuation, so it is dropped here instead.
-    """
+def _is_kept(child: object) -> bool:
+    """Return True for a child that carries meaning for the AST."""
+    # An optional `[ ]` item absent from the text arrives as None.
     if child is None:
         return False
 
+    # A rule marked with `!` in the grammar keeps every one of its tokens.
+    # That overrides the filtering the leading underscore of `_NEWLINE`
+    # otherwise applies.
+    # The statement terminator is punctuation, so it is dropped here instead.
     return not (isinstance(child, Token) and child.type == "_NEWLINE")
 
 
+# The return is deliberately left unannotated,
+# although the truthful type is `AstNode | str`.
+# See "Known rough edges" in docs/developer-notes.md before adding it.
 def build_ast(tree: Tree, file: str):
+    """Convert a Lark parse tree into the AST, bottom up.
+
+    Returns a bare `str` for an annotation rule such as `tick_var_annot`,
+    whose value is the annotation name rather than a node of its own.
+
+    Raises `ParseError` for a duplicate or a missing declaration,
+    and `CompilerError` for a tree shape the grammar should not produce.
+    """
     children = [
         build_ast(child, file) if isinstance(child, Tree) else child
         for child in tree.children
@@ -254,6 +276,8 @@ def build_ast(tree: Tree, file: str):
 
             assert block is not None
 
+            # The name is a token, not a node,
+            # so the children are rebuilt from the nodes alone.
             children = list(params)
             if rtype is not None:
                 children.append(rtype)
@@ -470,7 +494,7 @@ def build_ast(tree: Tree, file: str):
                 )
             if ember_ignition_prob is None:
                 raise ParseError(
-                    "ignition-prob has not been defined",
+                    "ember-ignition-prob has not been defined",
                     pos=pos,
                 )
             if create_flames is None:
@@ -566,7 +590,15 @@ def build_ast(tree: Tree, file: str):
 
 
 @node_error_attributer
-def build_scope(node: AstNode, scope: ChainMap[str, Any]):
+def build_scope(node: AstNode, scope: ChainMap[str, Any]) -> None:
+    """Attach a scope to every node that resolves names, and bind each declaration.
+
+    Mutates the tree and `scope` in place.
+    A function, and each fire-model clause, opens a child scope,
+    so a tile variable bound by a clause does not leak out of it.
+
+    Raises `ReferenceError` when a name is defined twice in one scope.
+    """
     match node:
         case Source() as source:
             source.scope = scope
@@ -633,7 +665,8 @@ def build_scope(node: AstNode, scope: ChainMap[str, Any]):
 
 
 @node_error_attributer
-def collect_local_varaibles(node: AstNode):
+def collect_local_variables(node: AstNode) -> None:
+    """Fill each function's `lvars` from the variables its own scope holds."""
     match node:
         case Func() as func:
             assert func.scope is not None
@@ -643,14 +676,22 @@ def collect_local_varaibles(node: AstNode):
                     func.lvars.append(var)
 
     for child in node.children:
-        collect_local_varaibles(child)
+        collect_local_variables(child)
 
 
 @node_error_attributer
-def link_return_statements(node: AstNode, func: Func | None):
+def link_return_statements(node: AstNode, func: Func | None) -> None:
+    """Point each return statement at its enclosing function, and back.
+
+    `func` is the function the walk is currently inside, and None at the top.
+    """
     match node:
         case Func() as func:
-            func = func
+            # `as func` rebinds the parameter for the recursion below,
+            # which is how a return statement in the body reaches this function.
+            # Without the capture, `func` stays None,
+            # and the assert on the return statement fails.
+            pass
         case ReturnStmt() as stmt:
             assert func is not None
             assert stmt.func is None
@@ -662,7 +703,11 @@ def link_return_statements(node: AstNode, func: Func | None):
 
 
 @node_error_attributer
-def populate_tile_objects(node: AstNode, tile_data: TileData):
+def populate_tile_objects(node: AstNode, tile_data: TileData) -> None:
+    """Give each tile variable bound by a fire-model clause its attributes.
+
+    Expects `build_scope` to have run on the same tree first.
+    """
     match node:
         case (
             CreateEmbers()
@@ -688,10 +733,19 @@ def populate_tile_objects(node: AstNode, tile_data: TileData):
         populate_tile_objects(child, tile_data)
 
 
-def populate_source_opts(source: Source):
+def populate_source_opts(source: Source) -> None:
+    """Fill `source.opts` with every option, taking the default where none is declared.
+
+    Raises `CodeError` for an unknown option, for one declared twice,
+    or for a chunk size smaller than the matching maximum jump.
+    """
     source.opts["max_jump_x"] = 1
     source.opts["max_jump_y"] = 1
     source.opts["max_ember_count"] = 100
+    # chunk_size_x and chunk_size_y are validated below
+    # and emitted as constants in the generated C++,
+    # but nothing there reads them, so setting one has no effect.
+    # They are here for a tiled traversal that is not written yet.
     source.opts["chunk_size_x"] = 64
     source.opts["chunk_size_y"] = 64
 
@@ -717,7 +771,8 @@ def populate_source_opts(source: Source):
         )
 
 
-def validate_tick_data(tick_data: TickData):
+def validate_tick_data(tick_data: TickData) -> None:
+    """Raise `CodeError` unless exactly one tick variable is annotated `key`."""
     num_keys = sum(1 for var in tick_data.tick_vars if "key" in var.annots)
     if num_keys != 1:
         raise CodeError(
@@ -726,7 +781,11 @@ def validate_tick_data(tick_data: TickData):
         )
 
 
-def validate_tile_data(tile_data: TileData):
+def validate_tile_data(tile_data: TileData) -> None:
+    """Check that the tile data has one `position` and one `fire_state` variable.
+
+    Raises `CodeError` unless exactly one tile variable has each of those types.
+    """
     num_positions = sum(1 for var in tile_data.tile_vars if var.type.name == "position")
     if num_positions != 1:
         raise CodeError(
@@ -742,18 +801,29 @@ def validate_tile_data(tile_data: TileData):
         )
 
 
-def parse(file: str, text: str):
+def parse(file: str, text: str) -> Source:
+    """Parse and fully check FFSL text, and return a tree ready for a backend.
+
+    `file` is recorded in every node's position,
+    which the error messages and the generated `#line` directives both use.
+
+    Raises `CodeError` for a fault the checks find in the model,
+    Lark's `UnexpectedInput` or `DedentError` for text the grammar rejects,
+    and `CompilerError` for a fault in the compiler.
+    """
     parser = get_parser()
 
     tree = parser.parse(text)
     source: Source = cast(Source, build_ast(tree, file))
 
+    # The order of these passes is load bearing.
+    # See docs/developer-notes.md.
     root_scope = ChainMap()
     add_builtins(root_scope)
     build_scope(source, root_scope)
     assert source.scope is not None
 
-    collect_local_varaibles(source)
+    collect_local_variables(source)
     link_return_statements(source, None)
     populate_tile_objects(source, source.tile_data)
     populate_source_opts(source)
